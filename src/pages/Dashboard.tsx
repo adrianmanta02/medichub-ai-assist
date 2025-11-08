@@ -10,6 +10,7 @@ import VoiceControl from "@/components/dashboard/VoiceControl";
 import NotificationPanel from "@/components/dashboard/NotificationPanel";
 import DocumentScanner from "@/components/dashboard/DocumentScanner";
 import { supabase } from "@/integrations/supabase/client";
+import useWaitTimes from "@/hooks/useWaitTimes";
 import { useToast } from "@/hooks/use-toast";
 
 const Dashboard = () => {
@@ -17,6 +18,7 @@ const Dashboard = () => {
   const [isVoiceActive, setIsVoiceActive] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [user, setUser] = useState<any>(null);
+  const { globalAverage: globalAverageWaitTime } = useWaitTimes(2);
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -124,7 +126,7 @@ const Dashboard = () => {
                 <Clock className="w-6 h-6 text-secondary" />
               </div>
               <div>
-                <p className="text-2xl font-bold">5 min</p>
+                <p className="text-2xl font-bold">{globalAverageWaitTime} min</p>
                 <p className="text-xs text-muted-foreground">Timp mediu așteptare</p>
               </div>
             </div>

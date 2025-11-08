@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Search, MapPin, Clock, Star, Navigation, Phone } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import useWaitTimes from "@/hooks/useWaitTimes";
 import { useToast } from "@/hooks/use-toast";
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
@@ -47,67 +48,26 @@ const RealTimeMapView = () => {
   const [selectedClinic, setSelectedClinic] = useState<Clinic | null>(null);
   const [userLocation, setUserLocation] = useState<[number, number]>([44.4268, 26.1025]); // Bucharest center
   const [loading, setLoading] = useState(true);
+  const [waitTimeInput, setWaitTimeInput] = useState<{ [key: string]: string }>({});
+  const { reportWaitTime, clinicAverages, globalAverage } = useWaitTimes(2);
   const { toast } = useToast();
 
-  useEffect(() => {
-    // Get user location
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          setUserLocation([position.coords.latitude, position.coords.longitude]);
-        },
-        (error) => {
-          console.error("Error getting location:", error);
-        }
-      );
-    }
-
-    fetchClinics();
-    
-    // Realtime subscription for wait times
-    const channel = supabase
-      .channel('wait_times_changes')
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'wait_times'
-        },
-        () => {
-          fetchClinics();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, []);
-
-  const fetchClinics = async () => {
+  const fetchClinics = useCallback(async () => {
     try {
       const { data: clinicsData, error } = await supabase
         .from('clinics')
-        .select(`
-          *,
-          wait_times(wait_minutes, created_at)
-        `)
-        .order('created_at', { foreignTable: 'wait_times', ascending: false });
+        .select('*');
 
       if (error) throw error;
 
-      const clinicsWithWaitTime = clinicsData?.map((clinic: any) => {
-        const recentWaitTimes = clinic.wait_times
-          ?.filter((wt: any) => {
-            const hoursAgo = (Date.now() - new Date(wt.created_at).getTime()) / (1000 * 60 * 60);
-            return hoursAgo < 2;
-          })
-          .map((wt: any) => wt.wait_minutes) || [];
+      // Create a map of clinic averages from the hook
+      const clinicAvgMap = new Map(
+        clinicAverages.map(c => [c.clinic_id, c.average_wait])
+      );
 
-        const avgWaitTime = recentWaitTimes.length > 0
-          ? Math.round(recentWaitTimes.reduce((a: number, b: number) => a + b, 0) / recentWaitTimes.length)
-          : 15;
+      const clinicsWithWaitTime = clinicsData?.map((clinic: any) => {
+        // Use the average from the hook, or default to 15 if no data
+        const avgWaitTime = clinicAvgMap.get(clinic.id) || 15;
 
         return {
           ...clinic,
@@ -128,7 +88,23 @@ const RealTimeMapView = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [clinicAverages, selectedClinic, toast]);
+
+  useEffect(() => {
+    // Get user location
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setUserLocation([position.coords.latitude, position.coords.longitude]);
+        },
+        (error) => {
+          console.error("Error getting location:", error);
+        }
+      );
+    }
+
+    fetchClinics();
+  }, [fetchClinics]);
 
   const filteredClinics = clinics.filter(
     (clinic) =>
@@ -137,37 +113,31 @@ const RealTimeMapView = () => {
       clinic.type.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const reportWaitTime = async (clinicId: string, waitMinutes: number) => {
+  const handleReport = async (clinicId: string, waitMinutes: number) => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (!session) {
+      // Validate input
+      if (!clinicId || !waitMinutes || waitMinutes <= 0) {
         toast({
-          title: "Autentificare necesară",
-          description: "Trebuie să fii autentificat pentru a raporta timpul de așteptare",
+          title: "Eroare",
+          description: "Te rugăm să introduci un timp de așteptare valid",
           variant: "destructive",
         });
         return;
       }
 
-      const { error } = await supabase
-        .from('wait_times')
-        .insert({
-          clinic_id: clinicId,
-          wait_minutes: waitMinutes,
-          reported_by: session.user.id,
-        });
-
-      if (error) throw error;
-
+      await reportWaitTime(clinicId, waitMinutes);
+      setWaitTimeInput(prev => ({ ...prev, [clinicId]: '' }));
+      await fetchClinics(); // sync per-clinic averages
       toast({
         title: "Mulțumim!",
-        description: "Timpul de așteptare a fost raportat cu succes",
+        description: `Timpul de așteptare de ${waitMinutes} min a fost raportat cu succes`,
       });
     } catch (error: any) {
+      console.error('Error reporting wait time:', error);
+      const errorMessage = error?.message || error?.error?.message || "Nu s-a putut raporta timpul de așteptare";
       toast({
         title: "Eroare",
-        description: error.message,
+        description: errorMessage,
         variant: "destructive",
       });
     }
@@ -222,11 +192,39 @@ const RealTimeMapView = () => {
               }}
             >
               <Popup>
-                <div className="p-2">
+                <div className="p-2 min-w-[200px]">
                   <h4 className="font-semibold">{clinic.name}</h4>
                   <p className="text-sm text-muted-foreground">{clinic.type}</p>
                   <p className="text-sm mt-1">Timp așteptare: {clinic.wait_time} min</p>
                   <p className="text-sm">Rating: {clinic.average_rating} ⭐</p>
+                  
+                  <div className="mt-3 pt-3 border-t">
+                    <p className="text-xs font-medium mb-2">Raportează timp așteptare:</p>
+                    <div className="flex gap-2">
+                      <Input
+                        type="number"
+                        placeholder="min"
+                        min="0"
+                        max="180"
+                        value={waitTimeInput[clinic.id] || ''}
+                        onChange={(e) => setWaitTimeInput(prev => ({ ...prev, [clinic.id]: e.target.value }))}
+                        className="h-8 text-sm"
+                      />
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          const minutes = parseInt(waitTimeInput[clinic.id] || '0');
+                          if (minutes > 0) {
+                            handleReport(clinic.id, minutes);
+                          }
+                        }}
+                        disabled={!waitTimeInput[clinic.id] || parseInt(waitTimeInput[clinic.id]) <= 0}
+                        className="h-8"
+                      >
+                        Trimite
+                      </Button>
+                    </div>
+                  </div>
                 </div>
               </Popup>
             </Marker>
@@ -272,7 +270,41 @@ const RealTimeMapView = () => {
 
             <p className="text-xs text-muted-foreground mb-3">{clinic.address}</p>
 
-            <div className="flex gap-2">
+            {/* Wait time reporting form */}
+            <div className="mt-3 pt-3 border-t">
+              <p className="text-xs font-medium mb-2">Raportează timp așteptare:</p>
+              <div className="flex gap-2">
+                <Input
+                  type="number"
+                  placeholder="min"
+                  min="0"
+                  max="480"
+                  value={waitTimeInput[clinic.id] || ''}
+                  onChange={(e) => {
+                    e.stopPropagation();
+                    setWaitTimeInput(prev => ({ ...prev, [clinic.id]: e.target.value }));
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  className="h-8 text-sm flex-1"
+                />
+                <Button
+                  size="sm"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const minutes = parseInt(waitTimeInput[clinic.id] || '0');
+                    if (minutes > 0) {
+                      handleReport(clinic.id, minutes);
+                    }
+                  }}
+                  disabled={!waitTimeInput[clinic.id] || parseInt(waitTimeInput[clinic.id] || '0') <= 0}
+                  className="h-8"
+                >
+                  Trimite
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex gap-2 mt-3">
               <Button
                 size="sm"
                 onClick={(e) => {

@@ -25,6 +25,7 @@ const GOOGLE_PLACES_KEY = env('GOOGLE_PLACES_API_KEY');
 
 const KB_DIR = path.join(__dirname, 'kb');
 const CLINICS_FILE = path.join(__dirname, 'clinics.json');
+const WAIT_TIMES_FILE = path.join(__dirname, 'wait-times.json');
 
 function loadKB() {
   const docs = [];
@@ -46,6 +47,58 @@ function loadClinics() {
   } catch (e) {
     return [];
   }
+}
+
+function loadWaitTimes() {
+  if (!fs.existsSync(WAIT_TIMES_FILE)) return [];
+  try {
+    const raw = fs.readFileSync(WAIT_TIMES_FILE, 'utf8');
+    return JSON.parse(raw);
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveWaitTimes(waitTimes) {
+  try {
+    fs.writeFileSync(WAIT_TIMES_FILE, JSON.stringify(waitTimes, null, 2), 'utf8');
+    return true;
+  } catch (e) {
+    console.error('Error saving wait times:', e);
+    return false;
+  }
+}
+
+function getAverageWaitTime(clinicId) {
+  const waitTimes = loadWaitTimes();
+  const now = Date.now();
+  const twoHoursAgo = now - (2 * 60 * 60 * 1000); // 2 hours in milliseconds
+  
+  // Filter wait times for this clinic from last 2 hours
+  const recentTimes = waitTimes.filter(wt => 
+    wt.clinicId === clinicId && 
+    new Date(wt.timestamp).getTime() > twoHoursAgo
+  );
+  
+  if (recentTimes.length === 0) return null;
+  
+  const sum = recentTimes.reduce((acc, wt) => acc + wt.waitMinutes, 0);
+  return Math.round(sum / recentTimes.length);
+}
+
+function getGlobalAverageWaitTime() {
+  const waitTimes = loadWaitTimes();
+  const now = Date.now();
+  const twoHoursAgo = now - (2 * 60 * 60 * 1000);
+  
+  const recentTimes = waitTimes.filter(wt => 
+    new Date(wt.timestamp).getTime() > twoHoursAgo
+  );
+  
+  if (recentTimes.length === 0) return null;
+  
+  const sum = recentTimes.reduce((acc, wt) => acc + wt.waitMinutes, 0);
+  return Math.round(sum / recentTimes.length);
 }
 
 
@@ -500,6 +553,74 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // POST /api/wait-times - Report wait time for a clinic
+  if (req.method === 'POST' && req.url === '/api/wait-times') {
+    let body = '';
+    req.on('data', chunk => body += chunk.toString());
+    req.on('end', () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        const { clinicId, waitMinutes, userId } = payload;
+
+        if (!clinicId || typeof waitMinutes !== 'number') {
+          res.writeHead(400);
+          return res.end(JSON.stringify({ error: 'clinicId and waitMinutes are required' }));
+        }
+
+        const waitTimes = loadWaitTimes();
+        waitTimes.push({
+          clinicId,
+          waitMinutes,
+          userId: userId || 'anonymous',
+          timestamp: new Date().toISOString()
+        });
+
+        if (saveWaitTimes(waitTimes)) {
+          console.log(`[wait-times] New report for clinic ${clinicId}: ${waitMinutes} min`);
+          res.end(JSON.stringify({ 
+            success: true, 
+            averageWaitTime: getAverageWaitTime(clinicId)
+          }));
+        } else {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: 'Failed to save wait time' }));
+        }
+      } catch (e) {
+        console.error('wait-times POST error', e);
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'invalid payload' }));
+      }
+    });
+    return;
+  }
+
+  // GET /api/wait-times?clinicId=xxx - Get average wait time for a clinic
+  if (req.method === 'GET' && req.url.startsWith('/api/wait-times')) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const clinicId = url.searchParams.get('clinicId');
+
+      if (clinicId) {
+        const avgWaitTime = getAverageWaitTime(clinicId);
+        res.end(JSON.stringify({ 
+          clinicId, 
+          averageWaitTime: avgWaitTime !== null ? avgWaitTime : 15 // default 15 min if no data
+        }));
+      } else {
+        // Return global average
+        const globalAvg = getGlobalAverageWaitTime();
+        res.end(JSON.stringify({ 
+          globalAverageWaitTime: globalAvg !== null ? globalAvg : 15
+        }));
+      }
+    } catch (e) {
+      console.error('wait-times GET error', e);
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: 'server error' }));
+    }
+    return;
+  }
+
   // default: show simple landing
   if (req.method === 'GET' && req.url === '/') {
     res.end('HealthHub AI local server');
@@ -509,7 +630,23 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end('Not found');
 });
 
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+// Startup cu fallback automat daca portul este ocupat.
+function startServer(port, attempts = 0) {
+  const maxAttempts = 5;
+  server.listen(port, () => {
+    console.log(`Server running on http://localhost:${port}`);
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE' && attempts < maxAttempts) {
+      const nextPort = port + 1;
+      console.warn(`Port ${port} este ocupat. Incerc pe portul ${nextPort}...`);
+      setTimeout(() => startServer(nextPort, attempts + 1), 500);
+    } else {
+      console.error('Server failed to start:', err);
+      process.exit(1);
+    }
+  });
+}
+
+const initialPort = parseInt(process.env.PORT || '3001', 10);
+startServer(initialPort);
