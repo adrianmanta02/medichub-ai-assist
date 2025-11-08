@@ -4,12 +4,24 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 // Pentru variabilele de mediu
 import dotenv from "dotenv";
-dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, ".env") });
+
+// Helper to read env vars and trim accidental surrounding quotes
+function env(key) {
+  const v = process.env[key];
+  if (!v && v !== '') return undefined;
+  return String(v).replace(/^\s*['"]|['"]\s*$/g, '').trim();
+}
+
+const GEOAPIFY_KEY = env('GEOAPIFY_API_KEY');
+const GOOGLE_PLACES_KEY = env('GOOGLE_PLACES_API_KEY');
 
 // It supports external LLM - Ollama.
 // ESM compatible __dirname
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const KB_DIR = path.join(__dirname, 'kb');
 const CLINICS_FILE = path.join(__dirname, 'clinics.json');
@@ -39,7 +51,7 @@ function loadClinics() {
 
 // helper: call Google Places Nearby + Details
 async function fetchNearbyPlacesFromGoogle(lat, lon, type = 'pharmacy', radius = 3000, openNow = true, maxResults = 10) {
-  const key = process.env.GOOGLE_PLACES_API_KEY;
+  const key = GOOGLE_PLACES_KEY;
   if (!key) return null;
 
   const params = new URLSearchParams({
@@ -59,6 +71,7 @@ async function fetchNearbyPlacesFromGoogle(lat, lon, type = 'pharmacy', radius =
   // acum serverul apeleaza Google Places (sau foloseste kb local), actioneaza si returneaza lista,
   // Lista va fi sortata by distance, only open ones -> Si va afisa 5 cele mai apropiate cu detaliile, link-ul si adresa.
   const nearbyUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`;
+  console.log('[google] calling nearbysearch, url=', nearbyUrl.slice(0, 200));
   const r = await fetch(nearbyUrl);
   if (!r.ok) throw new Error('Places nearby failed ' + r.status);
   const j = await r.json();
@@ -114,14 +127,15 @@ async function fetchNearbyPlacesFromGoogle(lat, lon, type = 'pharmacy', radius =
 // helper: call Geoapify Places API as an alternative to Google Places
 // Geoapify nearby -> folosește în fallback sau preferință
 async function fetchNearbyPlacesFromGeoapify(lat, lon, type = 'pharmacy', radius = 3000, openNow = true, maxResults = 10) {
-  const key = process.env.GEOAPIFY_API_KEY;
+  const key = GEOAPIFY_KEY;
   if (!key) return null;
 
   // Geoapify uses 'filters' and 'bias' or 'limit' params. We'll use 'categories' for pharmacy.
   // Category example: "healthcare.pharmacy"
   const category = type.toLowerCase().includes('pharm') ? 'healthcare.pharmacy' : 'healthcare';
-  const url = `https://api.geoapify.com/v2/places?categories=${encodeURIComponent(category)}&filter=circle:${lon},${lat},${radius}&limit=${maxResults}&apiKey=${key}`;
+  const url = `https://api.geoapify.com/v2/places?categories=${encodeURIComponent(category)}&filter=circle:${lon},${lat},${radius}&limit=${maxResults}&apiKey=${encodeURIComponent(key)}`;
 
+  console.log('[geoapify] calling places, url=', url.slice(0, 200));
   const r = await fetch(url);
   if (!r.ok) {
     const text = await r.text().catch(() => '');
@@ -320,6 +334,7 @@ const server = http.createServer((req, res) => {
 
             // Build a friendly answer text
             if (!clinicsResult || clinicsResult.length === 0) {
+              console.log('[places-ai] provider=', provider, 'count=', (clinicsResult && clinicsResult.length) || 0);
               const answer = 'Nu am găsit farmacii deschise în apropiere.';
               return res.end(JSON.stringify({ answer, emergency: false, clinics: [], provider }));
             }
@@ -335,6 +350,7 @@ const server = http.createServer((req, res) => {
               answer += '\n';
             });
 
+            console.log('[places-ai] provider=', provider, 'count=', clinicsResult.length);
             return res.end(JSON.stringify({ answer, emergency: false, clinics: clinicsResult, provider }));
           } catch (e) {
             console.error('ai clinics flow error', e);
