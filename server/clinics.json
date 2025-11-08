@@ -1,0 +1,41 @@
+[
+  {
+    "id": 1,
+    "name": "Clinica MedLife Calea Victoriei",
+    "type": "Clinică privată",
+    "specialty": "Medicină generală",
+    "waitTime": 5,
+    "rating": 4.8,
+    "distance": "",
+    "latitude": 44.4469,
+    "longitude": 26.0976,
+    "address": "Calea Victoriei 123, București",
+    "available": true
+  },
+  {
+    "id": 2,
+    "name": "Spitalul Universitar de Urgență",
+    "type": "Spital public",
+    "specialty": "Urgențe",
+    "waitTime": 25,
+    "rating": 4.2,
+    "distance": "",
+    "latitude": 44.4378,
+    "longitude": 26.0812,
+    "address": "Splaiul Independenței 169, București",
+    "available": true
+  },
+  {
+    "id": 3,
+    "name": "Farmacia Catena Unirii",
+    "type": "Farmacie",
+    "specialty": "Medicamente",
+    "waitTime": 2,
+    "rating": 4.6,
+    "distance": "",
+    "latitude": 44.4268,
+    "longitude": 26.1025,
+    "address": "Bulevardul Unirii 45, București",
+    "available": true
+  }
+]

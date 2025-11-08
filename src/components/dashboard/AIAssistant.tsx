@@ -4,7 +4,6 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Send, Bot, User, Sparkles } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
 
 interface Message {
   id: string;
@@ -50,10 +49,8 @@ const AIAssistant = () => {
     setIsTyping(true);
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      // Get user location for better recommendations
-      let userLocation = null;
+      // Get user location for better recommendations (optional)
+      let userLocation: { latitude: number; longitude: number } | null = null;
       if (navigator.geolocation) {
         try {
           const position = await new Promise<GeolocationPosition>((resolve, reject) => {
@@ -63,94 +60,31 @@ const AIAssistant = () => {
             latitude: position.coords.latitude,
             longitude: position.coords.longitude,
           };
-        } catch (error) {
-          console.log("Could not get location");
+        } catch (err) {
+          // ignore location errors, proceed without location
+          userLocation = null;
         }
       }
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/medical-ai-assistant`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          },
-          body: JSON.stringify({
-            messages: [...messages, userMessage].map(m => ({
-              role: m.role,
-              content: m.content
-            })),
-            userLocation,
-          }),
-        }
-      );
+      // Send to local AI endpoint (server will call external LLM if configured)
+      const resp = await fetch('http://localhost:3001/api/ai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })), userLocation })
+      });
 
-      if (!response.ok || !response.body) {
-        throw new Error("Failed to get AI response");
-      }
+      if (!resp.ok) throw new Error('AI server error');
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let textBuffer = "";
-      let streamDone = false;
-      let assistantContent = "";
+      const payload = await resp.json();
 
-      // Create assistant message placeholder
-      const assistantId = (Date.now() + 1).toString();
-      
-      while (!streamDone) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        textBuffer += decoder.decode(value, { stream: true });
+      const assistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: payload.answer || 'Nu am găsit un răspuns.',
+        timestamp: new Date(),
+      };
 
-        let newlineIndex: number;
-        while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
-          let line = textBuffer.slice(0, newlineIndex);
-          textBuffer = textBuffer.slice(newlineIndex + 1);
-
-          if (line.endsWith("\r")) line = line.slice(0, -1);
-          if (line.startsWith(":") || line.trim() === "") continue;
-          if (!line.startsWith("data: ")) continue;
-
-          const jsonStr = line.slice(6).trim();
-          if (jsonStr === "[DONE]") {
-            streamDone = true;
-            break;
-          }
-
-          try {
-            const parsed = JSON.parse(jsonStr);
-            const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-            
-            if (content) {
-              assistantContent += content;
-              
-              setMessages((prev) => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg?.id === assistantId) {
-                  return prev.map(m => 
-                    m.id === assistantId 
-                      ? { ...m, content: assistantContent }
-                      : m
-                  );
-                }
-                return [...prev, {
-                  id: assistantId,
-                  role: "assistant" as const,
-                  content: assistantContent,
-                  timestamp: new Date(),
-                }];
-              });
-            }
-          } catch {
-            textBuffer = line + "\n" + textBuffer;
-            break;
-          }
-        }
-      }
-
+      setMessages((prev) => [...prev, assistantMessage]);
       setIsTyping(false);
     } catch (error: any) {
       console.error("AI error:", error);
@@ -198,11 +132,10 @@ const AIAssistant = () => {
             className={`flex gap-3 ${message.role === "user" ? "flex-row-reverse" : ""}`}
           >
             <div
-              className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
-                message.role === "user"
-                  ? "bg-primary"
-                  : "gradient-accent"
-              }`}
+              className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${message.role === "user"
+                ? "bg-primary"
+                : "gradient-accent"
+                }`}
             >
               {message.role === "user" ? (
                 <User className="w-5 h-5 text-white" />
@@ -211,16 +144,14 @@ const AIAssistant = () => {
               )}
             </div>
             <div
-              className={`flex-1 max-w-[80%] ${
-                message.role === "user" ? "text-right" : ""
-              }`}
+              className={`flex-1 max-w-[80%] ${message.role === "user" ? "text-right" : ""
+                }`}
             >
               <div
-                className={`inline-block p-3 rounded-2xl ${
-                  message.role === "user"
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-muted"
-                }`}
+                className={`inline-block p-3 rounded-2xl ${message.role === "user"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted"
+                  }`}
               >
                 <p className="text-sm whitespace-pre-line">{message.content}</p>
               </div>
