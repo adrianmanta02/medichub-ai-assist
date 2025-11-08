@@ -32,7 +32,7 @@ const Index = () => {
               <Button 
                 size="lg" 
                 className="gradient-primary text-white shadow-lg hover:shadow-xl transition-all text-lg px-8 py-6"
-                onClick={() => navigate('/dashboard')}
+                onClick={() => navigate('/auth')}
               >
                 Începe acum
                 <Activity className="ml-2 w-5 h-5" />
@@ -148,7 +148,7 @@ const Index = () => {
               <Button 
                 size="lg" 
                 className="gradient-primary text-white text-lg px-8 py-6"
-                onClick={() => navigate('/dashboard')}
+                onClick={() => navigate('/auth')}
               >
                 Creează cont gratuit
               </Button>

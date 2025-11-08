@@ -1,16 +1,66 @@
-import { useState } from "react";
-import { MapPin, MessageSquare, Mic, Bell, User, Activity, Clock, Star } from "lucide-react";
+import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { MapPin, MessageSquare, Mic, Bell, User, Activity, Clock, Star, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import MapView from "@/components/dashboard/MapView";
+import RealTimeMapView from "@/components/dashboard/RealTimeMapView";
 import AIAssistant from "@/components/dashboard/AIAssistant";
 import VoiceControl from "@/components/dashboard/VoiceControl";
 import NotificationPanel from "@/components/dashboard/NotificationPanel";
+import DocumentScanner from "@/components/dashboard/DocumentScanner";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
 
 const Dashboard = () => {
   const [activeTab, setActiveTab] = useState<"map" | "chat" | "notifications">("map");
   const [isVoiceActive, setIsVoiceActive] = useState(false);
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [user, setUser] = useState<any>(null);
+  const navigate = useNavigate();
+  const { toast } = useToast();
+
+  useEffect(() => {
+    // Check authentication
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) {
+        navigate("/auth");
+      } else {
+        setUser(session.user);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!session) {
+        navigate("/auth");
+      } else {
+        setUser(session.user);
+      }
+    });
+
+    // Update time every second
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+
+    return () => {
+      subscription.unsubscribe();
+      clearInterval(timer);
+    };
+  }, [navigate]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    toast({
+      title: "Deconectare reușită",
+      description: "Pe curând!",
+    });
+    navigate("/");
+  };
+
+  if (!user) {
+    return null;
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-primary-light/5 to-accent-light/5">
@@ -22,10 +72,17 @@ const Dashboard = () => {
               <div className="w-10 h-10 rounded-xl gradient-primary flex items-center justify-center">
                 <Activity className="w-6 h-6 text-white" />
               </div>
-              <div>
-                <h1 className="text-xl font-bold">HealthHub AI</h1>
-                <p className="text-xs text-muted-foreground">Asistentul tău medical personal</p>
-              </div>
+            <div>
+              <h1 className="text-xl font-bold">HealthHub AI</h1>
+              <p className="text-xs text-muted-foreground">
+                {currentTime.toLocaleDateString('ro-RO', { 
+                  weekday: 'long', 
+                  year: 'numeric', 
+                  month: 'long', 
+                  day: 'numeric' 
+                })} - {currentTime.toLocaleTimeString('ro-RO')}
+              </p>
+            </div>
             </div>
             
             <div className="flex items-center gap-2">
@@ -37,8 +94,8 @@ const Dashboard = () => {
                 <Bell className="w-5 h-5" />
                 <span className="absolute top-1 right-1 w-2 h-2 bg-destructive rounded-full" />
               </Button>
-              <Button variant="ghost" size="icon">
-                <User className="w-5 h-5" />
+              <Button variant="ghost" size="icon" onClick={handleLogout}>
+                <LogOut className="w-5 h-5" />
               </Button>
             </div>
           </div>
@@ -129,7 +186,7 @@ const Dashboard = () => {
         {/* Content Area */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
-            {activeTab === "map" && <MapView />}
+            {activeTab === "map" && <RealTimeMapView />}
             {activeTab === "chat" && <AIAssistant />}
             {activeTab === "notifications" && <NotificationPanel />}
           </div>
@@ -181,6 +238,8 @@ const Dashboard = () => {
                 </div>
               </div>
             </Card>
+
+            <DocumentScanner />
 
             <Card className="p-6 glass-card gradient-accent">
               <h3 className="font-semibold mb-2 text-white">💡 Sfat zilnic</h3>

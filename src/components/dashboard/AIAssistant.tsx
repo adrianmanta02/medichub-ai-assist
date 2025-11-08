@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Send, Bot, User, Sparkles } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 
 interface Message {
   id: string;
@@ -48,35 +49,120 @@ const AIAssistant = () => {
     setInput("");
     setIsTyping(true);
 
-    // Simulate AI response
-    setTimeout(() => {
-      const aiMessage: Message = {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      // Get user location for better recommendations
+      let userLocation = null;
+      if (navigator.geolocation) {
+        try {
+          const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(resolve, reject);
+          });
+          userLocation = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+          };
+        } catch (error) {
+          console.log("Could not get location");
+        }
+      }
+
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/medical-ai-assistant`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          },
+          body: JSON.stringify({
+            messages: [...messages, userMessage].map(m => ({
+              role: m.role,
+              content: m.content
+            })),
+            userLocation,
+          }),
+        }
+      );
+
+      if (!response.ok || !response.body) {
+        throw new Error("Failed to get AI response");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let textBuffer = "";
+      let streamDone = false;
+      let assistantContent = "";
+
+      // Create assistant message placeholder
+      const assistantId = (Date.now() + 1).toString();
+      
+      while (!streamDone) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        textBuffer += decoder.decode(value, { stream: true });
+
+        let newlineIndex: number;
+        while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
+          let line = textBuffer.slice(0, newlineIndex);
+          textBuffer = textBuffer.slice(newlineIndex + 1);
+
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (line.startsWith(":") || line.trim() === "") continue;
+          if (!line.startsWith("data: ")) continue;
+
+          const jsonStr = line.slice(6).trim();
+          if (jsonStr === "[DONE]") {
+            streamDone = true;
+            break;
+          }
+
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const content = parsed.choices?.[0]?.delta?.content as string | undefined;
+            
+            if (content) {
+              assistantContent += content;
+              
+              setMessages((prev) => {
+                const lastMsg = prev[prev.length - 1];
+                if (lastMsg?.id === assistantId) {
+                  return prev.map(m => 
+                    m.id === assistantId 
+                      ? { ...m, content: assistantContent }
+                      : m
+                  );
+                }
+                return [...prev, {
+                  id: assistantId,
+                  role: "assistant" as const,
+                  content: assistantContent,
+                  timestamp: new Date(),
+                }];
+              });
+            }
+          } catch {
+            textBuffer = line + "\n" + textBuffer;
+            break;
+          }
+        }
+      }
+
+      setIsTyping(false);
+    } catch (error: any) {
+      console.error("AI error:", error);
+      const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: generateMockResponse(input),
+        content: "Ne cerem scuze, a apărut o eroare. Te rog încearcă din nou.",
         timestamp: new Date(),
       };
-      setMessages((prev) => [...prev, aiMessage]);
+      setMessages((prev) => [...prev, errorMessage]);
       setIsTyping(false);
-    }, 1500);
-  };
-
-  const generateMockResponse = (userInput: string): string => {
-    const lowerInput = userInput.toLowerCase();
-    
-    if (lowerInput.includes("pediatru") || lowerInput.includes("copil")) {
-      return "Am găsit 3 clinici cu pediatri disponibili în zona ta:\n\n1. Clinica Regina Maria - Dr. Ionescu Ana (disponibil mâine la 10:00)\n2. MedLife Pediatrie - Dr. Popescu Ion (disponibil astăzi la 16:30)\n3. Spitalul Marie Curie - Program urgențe 24/7\n\nVrei să programez o consultație?";
     }
-    
-    if (lowerInput.includes("analize") || lowerInput.includes("test")) {
-      return "Pentru analize de laborator, îți recomand:\n\n1. Synevo - Recoltare fără programare, 07:00-11:00\n2. Bioclinica - Programare online disponibilă\n3. Regina Maria - Rezultate în 24h\n\nCe tip de analize ai nevoie?";
-    }
-    
-    if (lowerInput.includes("program") || lowerInput.includes("consultație")) {
-      return "Perfect! Ca să te ajut să programezi o consultație, am nevoie de câteva detalii:\n\n- Ce specialitate medicală cauți?\n- Ai o preferință pentru clinică?\n- Ce interval orar preferi?\n\nÎmi poți spune aceste detalii?";
-    }
-
-    return "Am înțeles întrebarea ta. Pentru recomandări medicale personalizate, îți sugerez să consulți direct un medic specialist. Pot să te ajut să găsești clinica cea mai apropiată sau să programezi o consultație. Ce preferi?";
   };
 
   const suggestedQuestions = [
