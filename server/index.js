@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 // Pentru variabilele de mediu
 import dotenv from "dotenv";
+dotenv.config();
 
 // It supports external LLM - Ollama.
 // ESM compatible __dirname
@@ -35,6 +36,127 @@ function loadClinics() {
   }
 }
 
+
+// helper: call Google Places Nearby + Details
+async function fetchNearbyPlacesFromGoogle(lat, lon, type = 'pharmacy', radius = 3000, openNow = true, maxResults = 10) {
+  const key = process.env.GOOGLE_PLACES_API_KEY;
+  if (!key) return null;
+
+  const params = new URLSearchParams({
+    location: `${lat},${lon}`,
+    radius: String(radius),
+    type,
+    key,
+  });
+  if (openNow) params.set('opennow', 'true');
+
+
+
+  // Partea de locatie si API-ul extras din google maps.
+  // am folosit nearbysearch de la google -> returneaza opening_hours/phone/address.
+  // Pastreaza cheia API pe server !
+  // WorkFlow-ul ar fi: FrontEnd-ul obtine geolocatia -> si face POST la /api/clinics cu lat/lon + type=pharmacy ->
+  // acum serverul apeleaza Google Places (sau foloseste kb local), actioneaza si returneaza lista,
+  // Lista va fi sortata by distance, only open ones -> Si va afisa 5 cele mai apropiate cu detaliile, link-ul si adresa.
+  const nearbyUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`;
+  const r = await fetch(nearbyUrl);
+  if (!r.ok) throw new Error('Places nearby failed ' + r.status);
+  const j = await r.json();
+  const places = j.results || [];
+
+  // For each place, call place details to get opening_hours and phone/address
+  const detailed = [];
+  for (let i = 0; i < Math.min(places.length, maxResults); i++) {
+    const p = places[i];
+    const detailParams = new URLSearchParams({
+      place_id: p.place_id,
+      fields: 'name,formatted_address,geometry,opening_hours,formatted_phone_number',
+      key
+    });
+    const detailsUrl = `https://maps.googleapis.com/maps/api/place/details/json?${detailParams.toString()}`;
+    try {
+      const dr = await fetch(detailsUrl);
+      const dj = await dr.json();
+      const info = dj.result || {};
+      detailed.push({
+        id: p.place_id,
+        name: info.name || p.name,
+        address: info.formatted_address || p.vicinity || '',
+        latitude: (info.geometry?.location?.lat ?? p.geometry?.location?.lat),
+        longitude: (info.geometry?.location?.lng ?? p.geometry?.location?.lng),
+        distanceKm: haversine(lat, lon, info.geometry?.location?.lat ?? p.geometry?.location?.lat, info.geometry?.location?.lng ?? p.geometry?.location?.lng),
+        openNow: info.opening_hours?.open_now ?? (p.opening_hours?.open_now ?? null),
+        opening_hours: info.opening_hours || null,
+        phone: info.formatted_phone_number || null,
+        mapsUrl: `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent((info.geometry?.location?.lat ?? p.geometry?.location?.lat) + ',' + (info.geometry?.location?.lng ?? p.geometry?.location?.lng))}`
+      });
+    } catch (e) {
+      // ignore per-place errors but still include basic data
+      detailed.push({
+        id: p.place_id,
+        name: p.name,
+        address: p.vicinity || '',
+        latitude: p.geometry?.location?.lat,
+        longitude: p.geometry?.location?.lng,
+        distanceKm: haversine(lat, lon, p.geometry?.location?.lat, p.geometry?.location?.lng),
+        openNow: p.opening_hours?.open_now ?? null,
+        phone: null,
+        mapsUrl: `https://www.google.com/maps/dir/?api=1&destination=${p.geometry?.location?.lat},${p.geometry?.location?.lng}`
+      });
+    }
+  }
+
+  // sort by distance and return
+  detailed.sort((a, b) => a.distanceKm - b.distanceKm);
+  return detailed;
+}
+
+// helper: call Geoapify Places API as an alternative to Google Places
+// Geoapify nearby -> folosește în fallback sau preferință
+async function fetchNearbyPlacesFromGeoapify(lat, lon, type = 'pharmacy', radius = 3000, openNow = true, maxResults = 10) {
+  const key = process.env.GEOAPIFY_API_KEY;
+  if (!key) return null;
+
+  // Geoapify uses 'filters' and 'bias' or 'limit' params. We'll use 'categories' for pharmacy.
+  // Category example: "healthcare.pharmacy"
+  const category = type.toLowerCase().includes('pharm') ? 'healthcare.pharmacy' : 'healthcare';
+  const url = `https://api.geoapify.com/v2/places?categories=${encodeURIComponent(category)}&filter=circle:${lon},${lat},${radius}&limit=${maxResults}&apiKey=${key}`;
+
+  const r = await fetch(url);
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    throw new Error('Geoapify nearby failed: ' + r.status + ' ' + text);
+  }
+  const j = await r.json();
+  const features = j.features || [];
+
+  const results = features.map(f => {
+    const props = f.properties || {};
+    const loc = f.geometry?.coordinates || [null, null];
+    const placeLat = loc[1];
+    const placeLon = loc[0];
+    return {
+      id: props.xid || props.place_id || props.osm_id || props.fsq_id || (props.name ? `${props.name}-${props.lon}-${props.lat}` : JSON.stringify(props)),
+      name: props.name || props.address?.name || '',
+      address: (props.address && (props.address.road || props.address.city || props.address.state)) ? `${props.address.road || ''} ${props.address.house_number || ''}, ${props.address.city || ''}`.trim() : (props.formatted || props.address || ''),
+      latitude: placeLat,
+      longitude: placeLon,
+      distanceKm: typeof placeLat === 'number' ? haversine(lat, lon, placeLat, placeLon) : null,
+      openNow: (props.time !== undefined && props.time !== null) ? props.time : (props.opening_hours?.open_now ?? null), // Geoapify may return opening_hours
+      opening_hours: props.opening_hours || null,
+      phone: props.phone || props.tel || null,
+      mapsUrl: `https://www.openstreetmap.org/?mlat=${placeLat}&mlon=${placeLon}#map=18/${placeLat}/${placeLon}`
+    };
+  });
+
+  results.sort((a, b) => (a.distanceKm || 1e6) - (b.distanceKm || 1e6));
+  return results.slice(0, maxResults);
+}
+
+
+
+
+
 const kb = loadKB();
 const clinics = loadClinics();
 
@@ -42,29 +164,29 @@ const clinics = loadClinics();
 async function callExternalLLM(prompt, opts = {}) {
   const provider = (process.env.LLM_PROVIDER || '').toLowerCase();
   try {
-  if (provider === 'ollama' && process.env.OLLAMA_API_URL) {
-    const url = process.env.OLLAMA_API_URL; // e.g. http://localhost:11434/api/generate
-    const model = process.env.OLLAMA_MODEL || "llama3";
+    if (provider === 'ollama' && process.env.OLLAMA_API_URL) {
+      const url = process.env.OLLAMA_API_URL; // e.g. http://localhost:11434/api/generate
+      const model = process.env.OLLAMA_MODEL || "llama3";
 
-    const body = url.includes("/api/chat")
-      ? { model, messages: [{ role: 'user', content: prompt }] }
-      : { model, prompt, stream: false };
+      const body = url.includes("/api/chat")
+        ? { model, messages: [{ role: 'user', content: prompt }] }
+        : { model, prompt, stream: false };
 
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
 
-    const j = await r.json();
+      const j = await r.json();
 
-    if (j?.response) return j.response;
-    if (j?.message?.content) return j.message.content;
-    if (j?.output) return Array.isArray(j.output)
-      ? j.output.map(o => o.content || JSON.stringify(o)).join('\n')
-      : String(j.output);
-    return typeof j === 'string' ? j : JSON.stringify(j);
-  }
+      if (j?.response) return j.response;
+      if (j?.message?.content) return j.message.content;
+      if (j?.output) return Array.isArray(j.output)
+        ? j.output.map(o => o.content || JSON.stringify(o)).join('\n')
+        : String(j.output);
+      return typeof j === 'string' ? j : JSON.stringify(j);
+    }
 
 
     if (provider === 'hf' && process.env.HF_API_URL && process.env.HF_API_KEY) {
@@ -105,6 +227,13 @@ function emergencyDetected(text) {
   return patterns.some(p => t.includes(p));
 }
 
+function isClinicRequest(text) {
+  if (!text) return false;
+  const t = text.toLowerCase();
+  const clinicWords = ['farmaci', 'farmacie', 'farmacii', 'clinic', 'clinici', 'apropiat', 'aproape', 'deschis', 'deschise', 'orar', 'unde gasesc', 'programeaz'];
+  return clinicWords.some(w => t.includes(w));
+}
+
 function simpleRetrieve(query, topK = 3) {
   if (!query) return [];
   const q = query.toLowerCase().split(/\W+/).filter(Boolean);
@@ -141,6 +270,77 @@ const server = http.createServer((req, res) => {
         }
 
         const retrieved = simpleRetrieve(question, 6);
+
+        // If the question is about nearby clinics/pharmacies and user provided location, call clinics lookup
+        const userLocation = payload.userLocation || payload.location || null;
+        if (isClinicRequest(question) && userLocation && userLocation.latitude && userLocation.longitude) {
+          try {
+            const lat = parseFloat(userLocation.latitude);
+            const lon = parseFloat(userLocation.longitude);
+            const type = payload.type || 'pharmacy';
+            const openNow = payload.openNow === true || payload.openNow === 'true';
+            const radius = parseInt(payload.radius || process.env.PLACES_RADIUS_METERS || '3000', 10);
+            const maxResults = Math.min(parseInt(payload.maxResults || '5', 10), 20);
+
+            let clinicsResult = null;
+            let provider = 'local';
+
+
+            // If Google didn't return results, try Geoapify (if configured)
+            if (!clinicsResult && process.env.GEOAPIFY_API_KEY) {
+              try {
+                const results = await fetchNearbyPlacesFromGeoapify(lat, lon, type, radius, openNow, maxResults);
+                if (results && results.length > 0) {
+                  clinicsResult = results.slice(0, maxResults);
+                  provider = 'geoapify';
+                }
+              } catch (e) {
+                console.error('Geoapify Places error (ai clinic flow)', e);
+              }
+            }
+
+            if (!clinicsResult) {
+              // fallback to local dataset; support common synonyms (ro/en)
+              const normalizedType = (type || '').toLowerCase();
+              let synonyms = [normalizedType];
+              if (normalizedType.includes('pharm')) synonyms = ['pharmacy', 'farmacie'];
+              if (normalizedType.includes('clinic')) synonyms = ['clinic', 'clinica', 'clinici'];
+
+              clinicsResult = clinics
+                .filter(c => {
+                  if (!normalizedType) return true;
+                  const ctype = (c.type || '').toLowerCase();
+                  return synonyms.some(s => ctype.includes(s));
+                })
+                .map(c => ({ ...c, distanceKm: haversine(lat, lon, c.latitude, c.longitude) }))
+                .sort((a, b) => a.distanceKm - b.distanceKm)
+                .slice(0, maxResults);
+              provider = 'local';
+            }
+
+            // Build a friendly answer text
+            if (!clinicsResult || clinicsResult.length === 0) {
+              const answer = 'Nu am găsit farmacii deschise în apropiere.';
+              return res.end(JSON.stringify({ answer, emergency: false, clinics: [], provider }));
+            }
+
+            let answer = `Am găsit ${clinicsResult.length} farmacii în apropiere:\n\n`;
+            clinicsResult.forEach((c, i) => {
+              const dist = typeof c.distanceKm === 'number' ? `${c.distanceKm.toFixed(1)} km` : '';
+              const open = c.openNow === true ? 'Deschis' : (c.openNow === false ? 'Închis' : 'Program necunoscut');
+              const closes = c.opening_hours?.periods ? '' : '';
+              answer += `${i + 1}. ${c.name} — ${c.address || ''} — ${dist} — ${open}`;
+              if (c.phone) answer += ` — Tel: ${c.phone}`;
+              if (c.mapsUrl) answer += ` — Harta: ${c.mapsUrl}`;
+              answer += '\n';
+            });
+
+            return res.end(JSON.stringify({ answer, emergency: false, clinics: clinicsResult, provider }));
+          } catch (e) {
+            console.error('ai clinics flow error', e);
+            // continue to LLM behaviour below
+          }
+        }
 
         // Prepare a context for LLM: include short snippets and ids
         const contextParts = retrieved.map(r => `Source: ${r.title}\n${r.text.trim().slice(0, 500)}`);
@@ -201,19 +401,84 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/api/clinics') {
     let body = '';
     req.on('data', chunk => body += chunk.toString());
-    req.on('end', () => {
+
+    req.on('end', async () => {
       try {
         const payload = JSON.parse(body || '{}');
         const lat = parseFloat(payload.latitude);
         const lon = parseFloat(payload.longitude);
+        const type = payload.type || 'pharmacy';
+        const openNow = payload.openNow === true || payload.openNow === 'true';
+        const radius = parseInt(payload.radius || process.env.PLACES_RADIUS_METERS || '3000', 10);
+        const maxResults = Math.min(parseInt(payload.maxResults || '5', 10), 20);
+
+        console.log('[clinics] request from', req.socket.remoteAddress, {
+          latitude: payload.latitude,
+          longitude: payload.longitude,
+          type, openNow, maxResults
+        });
+
+        // dacă lipsește locația, returnează fallback local
         if (isNaN(lat) || isNaN(lon)) {
-          return res.end(JSON.stringify({ clinics: clinics.slice(0, 5) }));
+          return res.end(JSON.stringify({
+            clinics: clinics.slice(0, Math.min(maxResults, clinics.length)),
+            provider: 'local',
+            note: 'no_lat_lon'
+          }));
         }
-        const scored = clinics.map(c => ({ ...c, distanceKm: haversine(lat, lon, c.latitude, c.longitude) }));
-        scored.sort((a, b) => a.distanceKm - b.distanceKm);
-        res.end(JSON.stringify({ clinics: scored.slice(0, 10) }));
+
+        // ---- încercăm Geoapify (gratuit & online) ----
+        let results = null;
+        let provider = 'none';
+
+        if (process.env.GEOAPIFY_API_KEY) {
+          try {
+            const geo = await fetchNearbyPlacesFromGeoapify(lat, lon, type, radius, openNow, maxResults);
+            if (geo && geo.length > 0) {
+              results = geo;
+              provider = 'geoapify';
+              console.log(`[clinics] Geoapify returned ${geo.length} results`);
+            }
+          } catch (err) {
+            console.error('Geoapify Places API error:', err);
+          }
+        }
+
+        // ---- dacă Geoapify nu a returnat nimic, fallback pe dataset local ----
+        if (!results || results.length === 0) {
+          console.log('[clinics] using local fallback dataset');
+          const scored = clinics
+            .filter(c => !type || (c.type && c.type.toLowerCase().includes(type.toLowerCase())))
+            .map(c => ({
+              ...c,
+              distanceKm: haversine(lat, lon, c.latitude, c.longitude)
+            }));
+
+          let filtered = scored;
+          if (openNow) {
+            filtered = scored.filter(c =>
+              c.opening_hours?.open_now === true ||
+              c.open_now === true ||
+              c.available === true
+            );
+          }
+
+          filtered.sort((a, b) => a.distanceKm - b.distanceKm);
+          results = filtered.slice(0, maxResults);
+          provider = 'local';
+        }
+
+        // ---- răspuns final ----
+        res.end(JSON.stringify({
+          clinics: results,
+          provider,
+          count: results?.length || 0
+        }));
+
       } catch (e) {
-        res.writeHead(500); res.end(JSON.stringify({ error: 'invalid payload' }));
+        console.error('clinics handler error', e);
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'invalid payload' }));
       }
     });
     return;

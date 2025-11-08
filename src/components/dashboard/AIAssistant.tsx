@@ -24,6 +24,8 @@ const AIAssistant = () => {
   ]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [clinics, setClinics] = useState<any[] | null>(null);
+  const [loadingClinics, setLoadingClinics] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -96,6 +98,56 @@ const AIAssistant = () => {
       };
       setMessages((prev) => [...prev, errorMessage]);
       setIsTyping(false);
+    }
+  };
+
+  const findNearbyClinics = async (openNow = true) => {
+    if (!navigator.geolocation) {
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: 'Localizarea nu este disponibilă în browserul tău.',
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, errorMessage]);
+      return;
+    }
+
+    setLoadingClinics(true);
+    try {
+      const pos = await new Promise<GeolocationPosition>((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject));
+      const userLocation = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+      const resp = await fetch('http://localhost:3001/api/clinics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ latitude: userLocation.latitude, longitude: userLocation.longitude, type: 'pharmacy', openNow, maxResults: 5 })
+      });
+      if (!resp.ok) throw new Error('Eroare la server');
+      const data = await resp.json();
+      const clinicsList = data.clinics || [];
+      setClinics(clinicsList);
+
+      // Debug: if zero results, include provider and server raw snippet in chat to help troubleshooting
+      const assistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: clinicsList.length > 0
+          ? (data.answer || `Am găsit ${clinicsList.length} farmacii în apropiere.`)
+          : `Am găsit 0 farmacii. Provider: ${data.provider || 'unknown'}. Răspuns server (trunchiat): ${JSON.stringify(data).slice(0, 200)}`,
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, assistantMessage]);
+    } catch (e: any) {
+      console.error('findNearbyClinics error', e);
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: 'Nu am putut obține lista de farmacii. Te rog încearcă din nou.',
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setLoadingClinics(false);
     }
   };
 
@@ -197,6 +249,42 @@ const AIAssistant = () => {
               >
                 {question}
               </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Quick actions */}
+      <div className="px-4 pb-3 space-y-2">
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => findNearbyClinics(true)} disabled={loadingClinics}>
+            {loadingClinics ? 'Caut...' : 'Găsește farmacii deschise'}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => findNearbyClinics(false)} disabled={loadingClinics}>
+            {loadingClinics ? 'Caut...' : 'Toate farmaciile din apropiere'}
+          </Button>
+        </div>
+      </div>
+
+      {/* Clinics results */}
+      {clinics && clinics.length > 0 && (
+        <div className="px-4 pb-3 space-y-2">
+          <p className="text-sm font-semibold">Farmacii găsite:</p>
+          <div className="flex flex-col gap-2">
+            {clinics.map((c: any) => (
+              <Card key={c.id} className="p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="font-medium">{c.name}</div>
+                    <div className="text-sm text-muted-foreground">{c.address}</div>
+                    <div className="text-xs text-muted-foreground">{c.distanceKm ? `${c.distanceKm.toFixed(1)} km` : ''} {c.openNow === true ? ' — Deschis' : c.openNow === false ? ' — Închis' : ''}</div>
+                  </div>
+                  <div className="flex flex-col items-end gap-2">
+                    {c.phone && <a className="text-sm text-primary" href={`tel:${c.phone}`}>Sună</a>}
+                    {c.mapsUrl && <a className="text-sm" target="_blank" rel="noreferrer" href={c.mapsUrl}>Vezi pe hartă</a>}
+                  </div>
+                </div>
+              </Card>
             ))}
           </div>
         </div>
