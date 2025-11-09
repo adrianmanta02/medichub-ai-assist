@@ -2,6 +2,23 @@
 @tailwind components;
 @tailwind utilities;
 
+/* User location marker pulse animation */
+@keyframes pulse {
+  0% {
+    box-shadow: 0 4px 16px rgba(59, 130, 246, 0.6), 0 0 0 8px rgba(59, 130, 246, 0.2);
+  }
+  50% {
+    box-shadow: 0 4px 16px rgba(59, 130, 246, 0.8), 0 0 0 12px rgba(59, 130, 246, 0.1);
+  }
+  100% {
+    box-shadow: 0 4px 16px rgba(59, 130, 246, 0.6), 0 0 0 8px rgba(59, 130, 246, 0.2);
+  }
+}
+
+.user-location-marker {
+  animation: pulse 2s infinite;
+}
+
 /* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
 All colors MUST be HSL.
 */

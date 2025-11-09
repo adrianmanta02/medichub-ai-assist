@@ -18,6 +18,8 @@ const Dashboard = () => {
   const [isVoiceActive, setIsVoiceActive] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [user, setUser] = useState<any>(null);
+  const [medications, setMedications] = useState<any[]>([]);
+  const [appointment, setAppointment] = useState<any | null>(null);
   const { globalAverage: globalAverageWaitTime } = useWaitTimes(2);
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -29,6 +31,7 @@ const Dashboard = () => {
         navigate("/auth");
       } else {
         setUser(session.user);
+        loadUserData(session.user.id);
       }
     });
 
@@ -37,6 +40,7 @@ const Dashboard = () => {
         navigate("/auth");
       } else {
         setUser(session.user);
+        loadUserData(session.user.id);
       }
     });
 
@@ -50,6 +54,84 @@ const Dashboard = () => {
       clearInterval(timer);
     };
   }, [navigate]);
+
+  const loadUserData = async (userId: string, showNotifications = false) => {
+    // Load medications
+    const { data: meds } = await supabase
+      .from('user_medications')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+    
+    if (meds) {
+      // Check if new medications were added
+      if (showNotifications && meds.length > medications.length) {
+        const newMeds = meds.slice(0, meds.length - medications.length);
+        newMeds.forEach(med => {
+          toast({
+            title: "💊 Medicament actualizat",
+            description: `${med.medication_name} ${med.dosage} a fost adăugat în Medicație`,
+            duration: 3000,
+          });
+        });
+      }
+      setMedications(meds);
+    }
+
+    // Load next appointment
+    const { data: appointments } = await supabase
+      .from('user_appointments')
+      .select('*')
+      .eq('user_id', userId)
+      .order('appointment_date', { ascending: true })
+      .limit(1);
+    
+    if (appointments && appointments.length > 0) {
+      // Check if appointment was updated
+      if (showNotifications && (!appointment || appointment.id !== appointments[0].id)) {
+        toast({
+          title: "📅 Programare actualizată",
+          description: `Programare cu ${appointments[0].doctor_name} a fost actualizată`,
+          duration: 3000,
+        });
+      }
+      setAppointment(appointments[0]);
+    } else {
+      setAppointment(null);
+    }
+  };
+
+  // Subscribe to real-time updates
+  useEffect(() => {
+    if (!user) return;
+
+    const medChannel = supabase
+      .channel('user_medications_changes')
+      .on('postgres_changes', 
+        { event: '*', schema: 'public', table: 'user_medications', filter: `user_id=eq.${user.id}` },
+        (payload) => {
+          console.log('[realtime] Medication change:', payload.eventType);
+          loadUserData(user.id, true); // Show notifications for real-time updates
+        }
+      )
+      .subscribe();
+
+    const aptChannel = supabase
+      .channel('user_appointments_changes')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'user_appointments', filter: `user_id=eq.${user.id}` },
+        (payload) => {
+          console.log('[realtime] Appointment change:', payload.eventType);
+          loadUserData(user.id, true); // Show notifications for real-time updates
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(medChannel);
+      supabase.removeChannel(aptChannel);
+    };
+  }, [user, medications, appointment]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -209,22 +291,36 @@ const Dashboard = () => {
                 <Activity className="w-5 h-5 text-primary" />
                 Următoarea consultație
               </h3>
-              <div className="space-y-3">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <p className="font-medium">Dr. Popescu Maria</p>
-                    <p className="text-sm text-muted-foreground">Medicină generală</p>
+              {appointment ? (
+                <div className="space-y-3">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="font-medium">{appointment.doctor_name}</p>
+                      <p className="text-sm text-muted-foreground">{appointment.specialty}</p>
+                    </div>
+                    {appointment.appointment_date && (
+                      <Badge variant="secondary">
+                        {appointment.appointment_date}
+                      </Badge>
+                    )}
                   </div>
-                  <Badge variant="secondary">Mâine</Badge>
+                  <div className="text-sm">
+                    {appointment.appointment_time && (
+                      <p className="text-muted-foreground">Ora: {appointment.appointment_time}</p>
+                    )}
+                    <p className="text-muted-foreground">{appointment.clinic_name}</p>
+                  </div>
+                  <Button size="sm" className="w-full">
+                    Vezi detalii
+                  </Button>
                 </div>
-                <div className="text-sm">
-                  <p className="text-muted-foreground">Ora: 10:00</p>
-                  <p className="text-muted-foreground">Clinica MedLife</p>
+              ) : (
+                <div className="text-center py-4">
+                  <p className="text-sm text-muted-foreground">
+                    De îndată ce vei programa o consultație, informațiile vor apărea aici.
+                  </p>
                 </div>
-                <Button size="sm" className="w-full">
-                  Vezi detalii
-                </Button>
-              </div>
+              )}
             </Card>
 
             <Card className="p-6 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
@@ -232,22 +328,30 @@ const Dashboard = () => {
                 <Clock className="w-5 h-5 text-accent" />
                 Medicație
               </h3>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="font-medium text-sm">Paracetamol</p>
-                    <p className="text-xs text-muted-foreground">500mg, 3x/zi</p>
-                  </div>
-                  <Badge variant="outline">12:00</Badge>
+              {medications.length > 0 ? (
+                <div className="space-y-3">
+                  {medications.map((med, idx) => (
+                    <div key={idx} className="flex items-center justify-between">
+                      <div>
+                        <p className="font-medium text-sm">{med.medication_name}</p>
+                        <p className="text-xs text-muted-foreground">{med.dosage}, {med.frequency}</p>
+                      </div>
+                      <Badge variant="outline">
+                        {med.frequency.includes('dimineața') ? 'Dimineața' : 
+                         med.frequency.includes('seara') ? 'Seara' : 
+                         med.frequency.includes('12') ? '12:00' : 
+                         med.frequency}
+                      </Badge>
+                    </div>
+                  ))}
                 </div>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="font-medium text-sm">Vitamina D</p>
-                    <p className="text-xs text-muted-foreground">1000 UI, 1x/zi</p>
-                  </div>
-                  <Badge variant="outline">Dimineața</Badge>
+              ) : (
+                <div className="text-center py-4">
+                  <p className="text-sm text-muted-foreground">
+                    De îndată ce vei primi o recomandare de medicament, informațiile vor apărea aici.
+                  </p>
                 </div>
-              </div>
+              )}
             </Card>
 
             <DocumentScanner />

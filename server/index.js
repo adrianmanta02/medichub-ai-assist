@@ -374,6 +374,533 @@ function emergencyDetected(text) {
   return patterns.some(p => t.includes(p));
 }
 
+// Extract medication information from LLM response
+function extractMedications(response, question) {
+  const medications = [];
+  const lowerResponse = response.toLowerCase();
+  const lowerQuestion = question.toLowerCase();
+  
+  // Check if question is about medication/pills
+  const isMedicationRequest = lowerQuestion.includes('pastil') || 
+                              lowerQuestion.includes('medicament') || 
+                              lowerQuestion.includes('recomand') ||
+                              lowerQuestion.includes('prescri') ||
+                              lowerQuestion.includes('doză') ||
+                              lowerQuestion.includes('doza') ||
+                              lowerQuestion.includes('pastile') ||
+                              lowerQuestion.includes('simptom') ||
+                              lowerQuestion.includes('durere');
+  
+  if (!isMedicationRequest) return medications;
+
+  // First, try to extract from JSON format [MEDICATIONS]...[/MEDICATIONS]
+  const jsonMatch = response.match(/\[MEDICATIONS\]([\s\S]*?)\[\/MEDICATIONS\]/);
+  if (jsonMatch) {
+    try {
+      const jsonData = JSON.parse(jsonMatch[1].trim());
+      if (jsonData.medications && Array.isArray(jsonData.medications)) {
+        for (const med of jsonData.medications) {
+          if (med.medication_name && med.dosage && med.frequency) {
+            medications.push({
+              medication_name: med.medication_name.trim(),
+              dosage: med.dosage.trim(),
+              frequency: med.frequency.trim()
+            });
+          }
+        }
+        if (medications.length > 0) {
+          console.log('[extract] Found medications from JSON:', medications);
+          return medications;
+        }
+      }
+    } catch (e) {
+      console.warn('[extract] Failed to parse medications JSON:', e.message);
+    }
+  }
+
+  // Improved medication patterns - more flexible and comprehensive
+  const medicationPatterns = [
+    // Pattern: "Poți lua Paracetamol 500mg, de 3x/zi" or "poți lua Omeprazol 20 mg, de 1 ori pe zi"
+    /(?:poți lua|recomand|sugerez|ia|luați|poți să iei)\s+([A-ZĂÂÎȘȚ][a-zăâîșț]+(?:\s+[A-ZĂÂÎȘȚ][a-zăâîșț]+)?)\s+(\d+)\s*(?:mg|ml|UI)?\s*(?:,|\s+de|\s+la)\s*(\d+\s*ori\s*pe\s*zi|\d+x\/zi|dimineața|seara|înainte de mese|după mese)/gi,
+    // Pattern: "Paracetamol 500mg, 3x/zi" or "Omeprazol 20 mg, de 1 ori pe zi"
+    /([A-ZĂÂÎȘȚ][a-zăâîșț]+(?:\s+[A-ZĂÂÎȘȚ][a-zăâîșț]+)?)\s+(\d+)\s*(?:mg|ml|UI)\s*(?:,|\s+de|\s+la)?\s*(\d+\s*ori\s*pe\s*zi|\d+x\/zi|dimineața|seara)/gi,
+    // Pattern: "500mg Paracetamol, 3x/zi"
+    /(\d+)\s*(?:mg|ml|UI)\s+([A-ZĂÂÎȘȚ][a-zăâîșț]+(?:\s+[A-ZĂÂÎȘȚ][a-zăâîșț]+)?)\s*(?:,|\s+de|\s+la)\s*(\d+\s*ori\s*pe\s*zi|\d+x\/zi|dimineața|seara)/gi,
+    // Pattern: "Paracetamol - 500mg - 3 ori pe zi"
+    /([A-ZĂÂÎȘȚ][a-zăâîșț]+(?:\s+[A-ZĂÂÎȘȚ][a-zăâîșț]+)?)\s*[-–]\s*(\d+)\s*(?:mg|ml|UI)\s*[-–]\s*(\d+\s*ori\s*pe\s*zi|\d+x\/zi|dimineața|seara)/gi,
+    // Pattern: "medicament X doză Y frecvență Z" (more flexible)
+    /([A-ZĂÂÎȘȚ][a-zăâîșț]+(?:\s+[A-ZĂÂÎȘȚ][a-zăâîșț]+)?)\s+(?:cu\s+)?(?:doză|doza)\s+(?:de\s+)?(\d+)\s*(?:mg|ml|UI)\s*(?:,|\s+)?(?:de\s+)?(\d+\s*ori\s*pe\s*zi|\d+x\/zi|dimineața|seara)/gi
+  ];
+
+  for (const pattern of medicationPatterns) {
+    const matches = [...response.matchAll(pattern)];
+    for (const match of matches) {
+      let name = match[1] || match[2] || '';
+      let dosage = match[2] || match[1] || '';
+      const frequency = match[3] || '';
+      
+      // Swap if dosage comes first (dosage is numeric)
+      if (dosage.match(/^\d+$/) && name.match(/^\d+$/)) {
+        [name, dosage] = [dosage, name];
+      }
+      
+      // Ensure dosage has unit if it's just a number
+      if (dosage && dosage.match(/^\d+$/) && !dosage.includes('mg') && !dosage.includes('ml') && !dosage.includes('UI')) {
+        // Try to find unit in the original match
+        const fullMatch = match[0];
+        if (fullMatch.includes('mg')) dosage = dosage + 'mg';
+        else if (fullMatch.includes('ml')) dosage = dosage + 'ml';
+        else if (fullMatch.includes('UI')) dosage = dosage + 'UI';
+        else dosage = dosage + 'mg'; // default
+      }
+      
+      // Normalize frequency
+      let normalizedFreq = frequency.trim();
+      if (normalizedFreq.includes('1 ori pe zi') || normalizedFreq.includes('o dată pe zi')) {
+        normalizedFreq = '1x/zi';
+      } else if (normalizedFreq.includes('2 ori pe zi')) {
+        normalizedFreq = '2x/zi';
+      } else if (normalizedFreq.includes('3 ori pe zi')) {
+        normalizedFreq = '3x/zi';
+      }
+      
+      if (name && dosage && frequency && !name.match(/^\d+$/)) {
+        medications.push({
+          medication_name: name.trim(),
+          dosage: dosage.trim(),
+          frequency: normalizedFreq
+        });
+      }
+    }
+  }
+
+  // Fallback: try to extract from common medication mentions with better patterns
+  const commonMeds = ['paracetamol', 'ibuprofen', 'aspirin', 'aspirină', 'vitamina d', 'vitamina c', 'calciu', 'nurofen'];
+  for (const med of commonMeds) {
+    if (lowerResponse.includes(med)) {
+      // Try multiple patterns for each medication
+      const patterns = [
+        new RegExp(`(${med}[^\\s]*)\\s+(\\d+[^\\s]*(?:mg|ml|UI)?)\\s*(?:,|de|la|-)\\s*([^\\.,\\n]+)`, 'i'),
+        new RegExp(`(\\d+[^\\s]*(?:mg|ml|UI)?)\\s+(${med}[^\\s]*)\\s*(?:,|de|la|-)\\s*([^\\.,\\n]+)`, 'i')
+      ];
+      
+      for (const pattern of patterns) {
+        const medMatch = response.match(pattern);
+        if (medMatch) {
+          const name = medMatch[1] || medMatch[2];
+          const dosage = medMatch[2] || medMatch[1];
+          const frequency = medMatch[3];
+          
+          if (name && dosage && frequency) {
+            medications.push({
+              medication_name: name.trim(),
+              dosage: dosage.trim(),
+              frequency: frequency.trim()
+            });
+            break; // Found one, move to next medication
+          }
+        }
+      }
+    }
+  }
+
+  // Remove duplicates
+  const unique = [];
+  const seen = new Set();
+  for (const med of medications) {
+    const key = `${med.medication_name}-${med.dosage}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(med);
+    }
+  }
+
+  return unique;
+}
+
+// Extract appointment information from LLM response
+function extractAppointments(response, question) {
+  const appointments = [];
+  const lowerResponse = response.toLowerCase();
+  const lowerQuestion = question.toLowerCase();
+  
+  // Check if question is about appointments - expanded detection
+  const isAppointmentRequest = lowerQuestion.includes('programare') || 
+                               lowerQuestion.includes('programez') ||
+                               lowerQuestion.includes('consultație') ||
+                               lowerQuestion.includes('consultatie') ||
+                               lowerQuestion.includes('apointment') ||
+                               lowerQuestion.includes('rezervare') ||
+                               lowerQuestion.includes('program') ||
+                               lowerQuestion.includes('rezerv') ||
+                               lowerQuestion.includes('dermatolog') ||
+                               lowerQuestion.includes('cardiolog') ||
+                               lowerQuestion.includes('pediatru') ||
+                               lowerQuestion.includes('medic') ||
+                               // Also check response for appointment keywords
+                               lowerResponse.includes('programat') ||
+                               lowerResponse.includes('programare') ||
+                               lowerResponse.includes('consultație') ||
+                               lowerResponse.includes('consultatie');
+  
+  // If response mentions appointment-related keywords, try to extract even if question doesn't
+  if (!isAppointmentRequest && !lowerResponse.includes('programat') && !lowerResponse.includes('consultație')) {
+    return appointments;
+  }
+
+  // First, try to extract from JSON format [APPOINTMENT]...[/APPOINTMENT]
+  const jsonMatch = response.match(/\[APPOINTMENT\]([\s\S]*?)\[\/APPOINTMENT\]/);
+  if (jsonMatch) {
+    try {
+      const jsonData = JSON.parse(jsonMatch[1].trim());
+      if (jsonData.appointment) {
+        const apt = jsonData.appointment;
+        if (apt.doctor_name || apt.clinic_name) {
+          appointments.push({
+            doctor_name: apt.doctor_name || 'Nespecificat',
+            specialty: apt.specialty || 'Medicină generală',
+            clinic_name: apt.clinic_name || 'Nespecificat',
+            appointment_date: apt.appointment_date || null,
+            appointment_time: apt.appointment_time || null
+          });
+          console.log('[extract] Found appointment from JSON:', appointments[0]);
+          return appointments;
+        }
+      }
+    } catch (e) {
+      console.warn('[extract] Failed to parse appointment JSON:', e.message);
+    }
+  }
+
+  // Extract doctor name (Dr. Name or Name) - improved patterns
+  let doctorName = null;
+  const doctorPatterns = [
+    /(?:dr\.?|doctor|medic|d\.?r\.?)\s+([A-ZĂÂÎȘȚ][a-zăâîșț]+(?:\s+[A-ZĂÂÎȘȚ][a-zăâîșț]+)?)/i,
+    /([A-ZĂÂÎȘȚ][a-zăâîșț]+(?:\s+[A-ZĂÂÎȘȚ][a-zăâîșț]+)?)\s+(?:este|va fi|va fi la)/i
+  ];
+  
+  for (const pattern of doctorPatterns) {
+    const match = response.match(pattern);
+    if (match) {
+      doctorName = match[1] ? `Dr. ${match[1]}` : null;
+      break;
+    }
+  }
+
+  // Extract specialty - improved list with more variations
+  const specialties = [
+    { patterns: ['medicină generală', 'medicina generala', 'medicina generală', 'medic general'], name: 'Medicină generală' },
+    { patterns: ['pediatrie', 'pediatru', 'pediatric'], name: 'Pediatrie' },
+    { patterns: ['cardiologie', 'cardiolog'], name: 'Cardiologie' },
+    { patterns: ['dermatologie', 'dermatolog'], name: 'Dermatologie' },
+    { patterns: ['neurologie', 'neurolog'], name: 'Neurologie' },
+    { patterns: ['stomatologie', 'stomatolog', 'dentist'], name: 'Stomatologie' },
+    { patterns: ['oftalmologie', 'oftalmolog'], name: 'Oftalmologie' },
+    { patterns: ['ginecologie', 'ginecolog'], name: 'Ginecologie' },
+    { patterns: ['urologie', 'urolog'], name: 'Urologie' },
+    { patterns: ['endocrinologie', 'endocrinolog'], name: 'Endocrinologie' },
+    { patterns: ['pneumologie', 'pneumolog'], name: 'Pneumologie' },
+    { patterns: ['gastroenterologie', 'gastroenterolog'], name: 'Gastroenterologie' }
+  ];
+  let specialty = null;
+  for (const spec of specialties) {
+    for (const pattern of spec.patterns) {
+      if (lowerResponse.includes(pattern.toLowerCase()) || lowerQuestion.includes(pattern.toLowerCase())) {
+        specialty = spec.name;
+        break;
+      }
+    }
+    if (specialty) break;
+  }
+
+  // Extract clinic name - improved patterns
+  let clinicName = null;
+  const clinicPatterns = [
+    /(?:la|clinica|spitalul|farmacia|centrul)\s+([A-ZĂÂÎȘȚ][a-zA-ZĂÂÎȘȚăâîșț\s]+?)(?:\.|,|$|\n)/i,
+    /([A-ZĂÂÎȘȚ][a-zA-ZĂÂÎȘȚăâîșț\s]+?)\s+(?:clinic|spital|farmacie|centru)/i
+  ];
+  
+  for (const pattern of clinicPatterns) {
+    const match = response.match(pattern);
+    if (match) {
+      clinicName = match[1] ? match[1].trim() : null;
+      if (clinicName && clinicName.length < 50) break; // Reasonable clinic name length
+    }
+  }
+
+  // Extract date - improved patterns with month names
+  let appointmentDate = null;
+  const months = ['ianuarie', 'februarie', 'martie', 'aprilie', 'mai', 'iunie', 
+                  'iulie', 'august', 'septembrie', 'octombrie', 'noiembrie', 'decembrie'];
+  const datePatterns = [
+    // "10 noiembrie" or "pe 10 noiembrie"
+    /(?:pe\s+)?(\d{1,2})\s+(ianuarie|februarie|martie|aprilie|mai|iunie|iulie|august|septembrie|octombrie|noiembrie|decembrie)/i,
+    // "mâine", "poimâine", day names
+    /(?:mâine|poimâine|luni|marți|miercuri|joi|vineri|sâmbătă|duminică)/i,
+    // "10/11/2024" or "10-11-2024"
+    /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/,
+    // "pe 10/11"
+    /pe\s+(\d{1,2})[\/\-](\d{1,2})/
+  ];
+  
+  for (const pattern of datePatterns) {
+    const match = response.match(pattern);
+    if (match) {
+      appointmentDate = match[0];
+      // If it's a month name, format it nicely
+      if (match[2] && months.includes(match[2].toLowerCase())) {
+        appointmentDate = `${match[1]} ${match[2]}`;
+      }
+      break;
+    }
+  }
+  
+  // Also check question for date if not found in response
+  if (!appointmentDate) {
+    for (const pattern of datePatterns) {
+      const match = question.match(pattern);
+      if (match) {
+        appointmentDate = match[0];
+        if (match[2] && months.includes(match[2].toLowerCase())) {
+          appointmentDate = `${match[1]} ${match[2]}`;
+        }
+        break;
+      }
+    }
+  }
+
+  // Extract time - improved patterns
+  let appointmentTime = null;
+  const timePatterns = [
+    /(?:la|ora|pe la)\s+(\d{1,2}):(\d{2})/i,
+    /(\d{1,2}):(\d{2})/,
+    /(\d{1,2})\s*(?:dimineața|seara|am|pm|AM|PM)/i
+  ];
+  
+  for (const pattern of timePatterns) {
+    const match = response.match(pattern);
+    if (match) {
+      appointmentTime = match[0];
+      break;
+    }
+  }
+
+  // Create appointment if we have at least specialty OR date OR doctor/clinic
+  // This allows detection even with partial information
+  if (specialty || appointmentDate || doctorName || clinicName) {
+    appointments.push({
+      doctor_name: doctorName || 'Nespecificat',
+      specialty: specialty || 'Medicină generală',
+      clinic_name: clinicName || 'Nespecificat',
+      appointment_date: appointmentDate,
+      appointment_time: appointmentTime
+    });
+    console.log('[extract] Appointment extracted:', appointments[0]);
+  }
+
+  return appointments;
+}
+
+// Function calling definitions (simulated for Ollama, can be extended for native support)
+const FUNCTION_DEFINITIONS = {
+  extract_medications: {
+    name: "extract_medications",
+    description: "Extrage informații despre medicamente recomandate din conversație",
+    parameters: {
+      type: "object",
+      properties: {
+        medications: {
+          type: "array",
+          description: "Lista de medicamente detectate",
+          items: {
+            type: "object",
+            properties: {
+              medication_name: {
+                type: "string",
+                description: "Numele complet al medicamentului (ex: Omeprazol, Paracetamol)"
+              },
+              dosage: {
+                type: "string",
+                description: "Doza medicamentului cu unitate (ex: 20mg, 500mg, 1000 UI)"
+              },
+              frequency: {
+                type: "string",
+                description: "Frecvența administrării (ex: 1x/zi, 3x/zi, dimineața, seara)"
+              }
+            },
+            required: ["medication_name", "dosage", "frequency"]
+          }
+        }
+      },
+      required: ["medications"]
+    }
+  },
+  extract_appointment: {
+    name: "extract_appointment",
+    description: "Extrage informații despre programări medicale din conversație",
+    parameters: {
+      type: "object",
+      properties: {
+        appointment: {
+          type: "object",
+          description: "Detaliile programării",
+          properties: {
+            doctor_name: {
+              type: "string",
+              description: "Numele doctorului (ex: Dr. Popescu Maria sau Nespecificat)"
+            },
+            specialty: {
+              type: "string",
+              description: "Specialitatea medicală (ex: dermatologie, pediatrie, medicină generală)"
+            },
+            clinic_name: {
+              type: "string",
+              description: "Numele clinicii sau Nespecificat"
+            },
+            appointment_date: {
+              type: "string",
+              description: "Data programării (ex: 10 noiembrie, mâine, 15/11/2024) sau null"
+            },
+            appointment_time: {
+              type: "string",
+              description: "Ora programării (ex: 10:00, dimineața) sau null"
+            }
+          },
+          required: ["doctor_name", "specialty", "clinic_name"]
+        }
+      },
+      required: ["appointment"]
+    }
+  }
+};
+
+// Use LLM with function calling approach (simulated for Ollama)
+async function extractWithFunctionCalling(response, question, conversationHistory = []) {
+  const lowerQuestion = question.toLowerCase();
+  const lowerResponse = response.toLowerCase();
+  
+  const isMedicationRequest = lowerQuestion.includes('pastil') || 
+                              lowerQuestion.includes('medicament') || 
+                              lowerQuestion.includes('recomand') ||
+                              lowerQuestion.includes('simptom') ||
+                              lowerQuestion.includes('durere') ||
+                              lowerResponse.includes('medicament') ||
+                              lowerResponse.includes('pastil');
+  
+  const isAppointmentRequest = lowerQuestion.includes('programare') || 
+                               lowerQuestion.includes('programez') ||
+                               lowerQuestion.includes('consultație') ||
+                               lowerQuestion.includes('consultatie') ||
+                               lowerQuestion.includes('dermatolog') ||
+                               lowerQuestion.includes('cardiolog') ||
+                               lowerQuestion.includes('pediatru') ||
+                               lowerQuestion.includes('medic') ||
+                               lowerResponse.includes('programat') ||
+                               lowerResponse.includes('consultație');
+
+  if (!isMedicationRequest && !isAppointmentRequest) {
+    return { medications: [], appointments: [] };
+  }
+
+  // Build function calling prompt (simulated - instructs LLM to return structured JSON)
+  const functionsToCall = [];
+  if (isMedicationRequest) functionsToCall.push('extract_medications');
+  if (isAppointmentRequest) functionsToCall.push('extract_appointment');
+
+  const functionCallingPrompt = `Ești un asistent AI care extrage date structurate din conversații medicale.
+
+FUNCȚII DISPONIBILE:
+${functionsToCall.map(fnName => {
+  const fn = FUNCTION_DEFINITIONS[fnName];
+  return `- ${fn.name}: ${fn.description}
+  Parametri: ${JSON.stringify(fn.parameters, null, 2)}`;
+}).join('\n\n')}
+
+INSTRUCȚIUNI:
+1. Analizează conversația completă (inclusiv istoricul) pentru a înțelege contextul
+2. Dacă utilizatorul menționează medicamente, apelează funcția extract_medications
+3. Dacă utilizatorul menționează programări, apelează funcția extract_appointment
+4. Returnează DOAR JSON valid în formatul:
+{
+  "function_calls": [
+    {
+      "function": "nume_functie",
+      "arguments": { ... }
+    }
+  ]
+}
+
+CONVERSAȚIA:
+${conversationHistory.map(m => `${m.role}: ${m.content}`).join('\n')}
+
+RĂSPUNS ACTUAL: ${response}
+
+ÎNTREBAREA UTILIZATORULUI: ${question}
+
+Returnează DOAR JSON valid, fără text suplimentar.`;
+
+  try {
+    const extractionResponse = await callExternalLLM(functionCallingPrompt, [
+      { 
+        role: 'system', 
+        content: 'Ești un asistent care extrage date structurate din conversații medicale folosind funcții predefinite. Returnezi DOAR JSON valid în formatul specificat, fără explicații sau text suplimentar.' 
+      },
+      { role: 'user', content: functionCallingPrompt }
+    ]);
+
+    if (extractionResponse) {
+      // Try to extract JSON from response
+      const jsonMatch = extractionResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          
+          // Process function calls
+          let medications = [];
+          let appointments = [];
+          
+          if (parsed.function_calls && Array.isArray(parsed.function_calls)) {
+            for (const call of parsed.function_calls) {
+              if (call.function === 'extract_medications' && call.arguments?.medications) {
+                medications = call.arguments.medications.filter(m => 
+                  m.medication_name && m.dosage && m.frequency
+                );
+              }
+              if (call.function === 'extract_appointment' && call.arguments?.appointment) {
+                const apt = call.arguments.appointment;
+                if (apt.doctor_name || apt.clinic_name || apt.specialty) {
+                  appointments.push(apt);
+                }
+              }
+            }
+          } else if (parsed.medications) {
+            // Fallback: direct medications array
+            medications = parsed.medications;
+          } else if (parsed.appointment) {
+            // Fallback: direct appointment object
+            appointments = [parsed.appointment];
+          }
+          
+          const result = { medications, appointments };
+          console.log('[extract-fc] Function calling extraction successful:', result);
+          return result;
+        } catch (parseError) {
+          console.warn('[extract-fc] Failed to parse function call JSON:', parseError.message);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[extract-fc] Function calling extraction failed:', e.message);
+  }
+
+  return { medications: [], appointments: [] };
+}
+
+// Legacy LLM extraction (kept for fallback)
+async function extractWithLLM(response, question) {
+  return extractWithFunctionCalling(response, question);
+}
+
 function isClinicRequest(text) {
   if (!text) return false;
   const t = text.toLowerCase();
@@ -515,19 +1042,74 @@ ROLUL TĂU:
 INSTRUCȚIUNI IMPORTANTE:
 1. Răspunde ÎNTOTDEAUNA în limba română, cu ton cald și respectuos
 2. Fii concis și relevant - răspunde direct la întrebare
-3. Dacă utilizatorul întreabă despre clinici/farmacii:
+3. CONTEXTUL CONVERSAȚIEI:
+   - Citește ATENT întreaga conversație anterioară
+   - Dacă utilizatorul răspunde "da", "nu", "ok", etc., referă-te la mesajul anterior
+   - Păstrează contextul - dacă tocmai ai programat o consultație, și utilizatorul spune "da", înțelege că confirmă programarea
+   - Fii natural și conversațional - răspunde ca un asistent real care își amintește ce s-a discutat
+4. Dacă utilizatorul întreabă despre clinici/farmacii:
    - Recomandă clinica cea mai potrivită (distanță mică, rating bun, timp așteptare scăzut)
    - Menționează concret numele, adresa, timpul de așteptare și rating-ul
    - Explică de ce ai ales acea clinică
-4. Dacă utilizatorul are simptome:
+4. Dacă utilizatorul întreabă despre medicamente/pastile:
+   - La FINALUL răspunsului, adaugă un JSON structurat cu medicamentele recomandate:
+     [MEDICATIONS]
+     {
+       "medications": [
+         {
+           "medication_name": "Nume Medicament",
+           "dosage": "doză (ex: 20mg, 500mg, 1000 UI)",
+           "frequency": "frecvență (ex: 1x/zi, 3x/zi, dimineața, seara)"
+         }
+       ]
+     }
+     [/MEDICATIONS]
+   - Exemplu: Dacă recomanzi "Poți lua Omeprazol 20 mg, de 1 ori pe zi", adaugă la final:
+     [MEDICATIONS]
+     {
+       "medications": [
+         {
+           "medication_name": "Omeprazol",
+           "dosage": "20mg",
+           "frequency": "1x/zi"
+         }
+       ]
+     }
+     [/MEDICATIONS]
+5. Dacă utilizatorul vrea să programeze o consultație:
+   - La FINALUL răspunsului, adaugă un JSON structurat cu programarea:
+     [APPOINTMENT]
+     {
+       "appointment": {
+         "doctor_name": "Dr. Nume Prenume",
+         "specialty": "specialitate (ex: medicină generală, pediatrie)",
+         "clinic_name": "Nume Clinică",
+         "appointment_date": "dată (ex: mâine, 15/11/2024, luni)",
+         "appointment_time": "oră (ex: 10:00, dimineața)"
+       }
+     }
+     [/APPOINTMENT]
+   - Exemplu: Dacă programezi consultație, adaugă la final:
+     [APPOINTMENT]
+     {
+       "appointment": {
+         "doctor_name": "Dr. Popescu Maria",
+         "specialty": "pediatrie",
+         "clinic_name": "Clinica MedLife",
+         "appointment_date": "mâine",
+         "appointment_time": "10:00"
+       }
+     }
+     [/APPOINTMENT]
+6. Dacă utilizatorul are simptome:
    - Sugerează măsuri generale (hidratare, odihnă, medicamente uzuale)
    - Indică când ar trebui să consulte un medic
    - Pentru urgențe, scrie clar: "URGENȚĂ: sună la 112"
-5. Dacă întrebarea nu e despre sănătate/clinici:
+7. Dacă întrebarea nu e despre sănătate/clinici:
    - Răspunde scurt și sugerează să cauți o clinică relevantă
    - Menționează că ești specializat în asistență medicală
-6. Folosește contextul furnizat pentru a da răspunsuri precise
-7. Dacă nu știi răspunsul, spune sincer și sugerează consultarea unui medic specialist
+8. Folosește contextul furnizat pentru a da răspunsuri precise
+9. Dacă nu știi răspunsul, spune sincer și sugerează consultarea unui medic specialist
 
 TON: Profesional dar prietenos, empatic, clar și pe înțelesul oricui.`;
           }
@@ -545,11 +1127,18 @@ TON: Profesional dar prietenos, empatic, clar și pe înțelesul oricui.`;
         }
         
         // Add conversation history (filter out previous system messages)
+        // Keep full conversation history for context awareness
         if (Array.isArray(payload.messages)) {
           const conversationHistory = payload.messages
             .filter(m => m.role !== 'system')
             .slice(0, -1); // Exclude the current message (last one)
           messagesForLLM.push(...conversationHistory);
+          
+          // Log conversation context for debugging
+          if (conversationHistory.length > 0) {
+            console.log('[ai] Conversation history]:', conversationHistory.length, 'previous messages');
+            console.log('[ai] Last user message:', conversationHistory[conversationHistory.length - 1]?.content?.slice(0, 100));
+          }
         }
         
         // Add current question with context
@@ -590,7 +1179,68 @@ TON: Profesional dar prietenos, empatic, clar și pe înțelesul oricui.`;
           }
         }
 
-        res.end(JSON.stringify({ answer, emergency: false, sources: retrieved.map(r => ({ id: r.id, title: r.title })) }));
+        // Extract structured data from LLM response using multi-tier approach
+        // Tier 1: Fast regex/JSON extraction
+        let extractedData = {
+          medications: extractMedications(answer, question),
+          appointments: extractAppointments(answer, question)
+        };
+
+        // Tier 2: AI-powered function calling extraction (more precise)
+        // Use this if regex failed or if we want higher precision
+        const lowerAnswer = answer.toLowerCase();
+        const shouldTryFunctionCalling = 
+          // Always try function calling for better precision, or if regex failed
+          process.env.USE_FUNCTION_CALLING === 'true' ||
+          (extractedData.medications.length === 0 && extractedData.appointments.length === 0) ||
+          (question.toLowerCase().includes('pastil') || question.toLowerCase().includes('medicament') || 
+           question.toLowerCase().includes('programare') || question.toLowerCase().includes('consultație') ||
+           question.toLowerCase().includes('dermatolog') || question.toLowerCase().includes('medic') ||
+           lowerAnswer.includes('programat') || lowerAnswer.includes('consultație') ||
+           lowerAnswer.includes('medicament') || lowerAnswer.includes('pastil'));
+        
+        if (shouldTryFunctionCalling) {
+          console.log('[extract] Using function calling extraction for better precision...');
+          // Get conversation history for context
+          const conversationHistory = Array.isArray(payload.messages) 
+            ? payload.messages.filter(m => m.role !== 'system').slice(0, -1)
+            : [];
+          
+          const fcExtracted = await extractWithFunctionCalling(answer, question, conversationHistory);
+          
+          // Merge results (function calling takes priority)
+          if (fcExtracted.medications.length > 0 || fcExtracted.appointments.length > 0) {
+            extractedData = {
+              medications: fcExtracted.medications.length > 0 ? fcExtracted.medications : extractedData.medications,
+              appointments: fcExtracted.appointments.length > 0 ? fcExtracted.appointments : extractedData.appointments
+            };
+            console.log('[extract] Function calling extraction successful');
+          } else if (extractedData.medications.length === 0 && extractedData.appointments.length === 0) {
+            // Fallback to legacy LLM extraction if function calling failed
+            console.log('[extract] Function calling returned no results, trying legacy LLM extraction...');
+            const llmExtracted = await extractWithLLM(answer, question);
+            if (llmExtracted.medications.length > 0 || llmExtracted.appointments.length > 0) {
+              extractedData = llmExtracted;
+              console.log('[extract] Legacy LLM extraction successful');
+            }
+          }
+        }
+
+        // Log extraction results for debugging
+        console.log('[extract] Results:', {
+          medications_count: extractedData.medications.length,
+          appointments_count: extractedData.appointments.length,
+          medications: extractedData.medications,
+          appointments: extractedData.appointments
+        });
+
+        // Return response with extracted data
+        res.end(JSON.stringify({ 
+          answer, 
+          emergency: false, 
+          sources: retrieved.map(r => ({ id: r.id, title: r.title })),
+          extractedData
+        }));
       } catch (e) {
         console.error('ai handler error', e);
         console.error('Error stack:', e.stack);

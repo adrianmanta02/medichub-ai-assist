@@ -4,6 +4,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Send, Bot, User, Sparkles } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
 
 interface Message {
   id: string;
@@ -27,6 +29,7 @@ const AIAssistant = () => {
   const [clinics, setClinics] = useState<any[] | null>(null);
   const [loadingClinics, setLoadingClinics] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const { toast } = useToast();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -101,6 +104,66 @@ const AIAssistant = () => {
       // Check if server returned an error
       if (payload.error) {
         throw new Error(payload.error);
+      }
+
+      // Save extracted medications and appointments to Supabase
+      if (payload.extractedData) {
+        const { medications, appointments } = payload.extractedData;
+        
+        // Get current user
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          // Save medications
+          if (medications && medications.length > 0) {
+            let savedCount = 0;
+            for (const med of medications) {
+              const { error } = await supabase.from('user_medications').insert({
+                user_id: session.user.id,
+                medication_name: med.medication_name,
+                dosage: med.dosage,
+                frequency: med.frequency
+              });
+              if (!error) savedCount++;
+            }
+            
+            if (savedCount > 0) {
+              toast({
+                title: "💊 Medicament adăugat",
+                description: `${savedCount} medicament${savedCount > 1 ? 'e' : ''} ${savedCount > 1 ? 'au fost' : 'a fost'} adăugat${savedCount > 1 ? 'e' : ''} în secțiunea Medicație`,
+                duration: 4000,
+              });
+            }
+          }
+
+          // Save appointments (replace existing if any)
+          if (appointments && appointments.length > 0) {
+            // Delete existing appointments for this user
+            await supabase.from('user_appointments').delete().eq('user_id', session.user.id);
+            
+            // Insert new appointment
+            let savedCount = 0;
+            for (const apt of appointments) {
+              const { error } = await supabase.from('user_appointments').insert({
+                user_id: session.user.id,
+                doctor_name: apt.doctor_name,
+                specialty: apt.specialty,
+                clinic_name: apt.clinic_name,
+                appointment_date: apt.appointment_date || null,
+                appointment_time: apt.appointment_time || null
+              });
+              if (!error) savedCount++;
+            }
+            
+            if (savedCount > 0) {
+              const apt = appointments[0];
+              toast({
+                title: "📅 Programare adăugată",
+                description: `Programare cu ${apt.doctor_name} la ${apt.clinic_name} a fost adăugată`,
+                duration: 4000,
+              });
+            }
+          }
+        }
       }
 
       const assistantMessage: Message = {
