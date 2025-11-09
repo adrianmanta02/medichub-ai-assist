@@ -380,7 +380,7 @@ function extractMedications(response, question) {
   const lowerResponse = response.toLowerCase();
   const lowerQuestion = question.toLowerCase();
   
-  // Check if question is about medication/pills
+  // Check if question or response mentions medication/pills - be more aggressive
   const isMedicationRequest = lowerQuestion.includes('pastil') || 
                               lowerQuestion.includes('medicament') || 
                               lowerQuestion.includes('recomand') ||
@@ -389,9 +389,17 @@ function extractMedications(response, question) {
                               lowerQuestion.includes('doza') ||
                               lowerQuestion.includes('pastile') ||
                               lowerQuestion.includes('simptom') ||
-                              lowerQuestion.includes('durere');
+                              lowerQuestion.includes('durere') ||
+                              // Also check response for medication mentions
+                              lowerResponse.includes('medicament') ||
+                              lowerResponse.includes('pastil') ||
+                              lowerResponse.includes('recomand') ||
+                              lowerResponse.includes('poți lua') ||
+                              lowerResponse.includes('ia ') ||
+                              lowerResponse.includes('luați');
   
-  if (!isMedicationRequest) return medications;
+  // Always try to extract if response contains medication patterns, even if question doesn't explicitly ask
+  // This allows detection when LLM suggests medications naturally
 
   // First, try to extract from JSON format [MEDICATIONS]...[/MEDICATIONS]
   const jsonMatch = response.match(/\[MEDICATIONS\]([\s\S]*?)\[\/MEDICATIONS\]/);
@@ -524,7 +532,7 @@ function extractAppointments(response, question) {
   const lowerResponse = response.toLowerCase();
   const lowerQuestion = question.toLowerCase();
   
-  // Check if question is about appointments - expanded detection
+  // Check if question or response is about appointments - expanded detection, be more aggressive
   const isAppointmentRequest = lowerQuestion.includes('programare') || 
                                lowerQuestion.includes('programez') ||
                                lowerQuestion.includes('consultație') ||
@@ -537,16 +545,18 @@ function extractAppointments(response, question) {
                                lowerQuestion.includes('cardiolog') ||
                                lowerQuestion.includes('pediatru') ||
                                lowerQuestion.includes('medic') ||
-                               // Also check response for appointment keywords
+                               // Also check response for appointment keywords - be more aggressive
                                lowerResponse.includes('programat') ||
                                lowerResponse.includes('programare') ||
                                lowerResponse.includes('consultație') ||
-                               lowerResponse.includes('consultatie');
+                               lowerResponse.includes('consultatie') ||
+                               lowerResponse.includes('dr.') ||
+                               lowerResponse.includes('doctor') ||
+                               lowerResponse.includes('clinica') ||
+                               lowerResponse.includes('spital');
   
-  // If response mentions appointment-related keywords, try to extract even if question doesn't
-  if (!isAppointmentRequest && !lowerResponse.includes('programat') && !lowerResponse.includes('consultație')) {
-    return appointments;
-  }
+  // Always try to extract if response mentions appointment-related keywords, even if question doesn't explicitly ask
+  // This allows detection when LLM suggests appointments naturally
 
   // First, try to extract from JSON format [APPOINTMENT]...[/APPOINTMENT]
   const jsonMatch = response.match(/\[APPOINTMENT\]([\s\S]*?)\[\/APPOINTMENT\]/);
@@ -775,96 +785,109 @@ const FUNCTION_DEFINITIONS = {
 };
 
 // Use LLM with function calling approach (simulated for Ollama)
+// This is now the PRIMARY extraction method - always tries to extract using AI
 async function extractWithFunctionCalling(response, question, conversationHistory = []) {
-  const lowerQuestion = question.toLowerCase();
-  const lowerResponse = response.toLowerCase();
-  
-  const isMedicationRequest = lowerQuestion.includes('pastil') || 
-                              lowerQuestion.includes('medicament') || 
-                              lowerQuestion.includes('recomand') ||
-                              lowerQuestion.includes('simptom') ||
-                              lowerQuestion.includes('durere') ||
-                              lowerResponse.includes('medicament') ||
-                              lowerResponse.includes('pastil');
-  
-  const isAppointmentRequest = lowerQuestion.includes('programare') || 
-                               lowerQuestion.includes('programez') ||
-                               lowerQuestion.includes('consultație') ||
-                               lowerQuestion.includes('consultatie') ||
-                               lowerQuestion.includes('dermatolog') ||
-                               lowerQuestion.includes('cardiolog') ||
-                               lowerQuestion.includes('pediatru') ||
-                               lowerQuestion.includes('medic') ||
-                               lowerResponse.includes('programat') ||
-                               lowerResponse.includes('consultație');
+  // Always try to extract - don't filter by keywords, let AI decide
+  // This makes detection more accurate and handles edge cases better
 
-  if (!isMedicationRequest && !isAppointmentRequest) {
-    return { medications: [], appointments: [] };
-  }
+  // Build comprehensive extraction prompt that analyzes the entire conversation
+  const fullConversation = [
+    ...conversationHistory,
+    { role: 'user', content: question },
+    { role: 'assistant', content: response }
+  ];
 
-  // Build function calling prompt (simulated - instructs LLM to return structured JSON)
-  const functionsToCall = [];
-  if (isMedicationRequest) functionsToCall.push('extract_medications');
-  if (isAppointmentRequest) functionsToCall.push('extract_appointment');
+  const extractionPrompt = `Ești un expert în extragerea de informații medicale structurate din conversații. Analizează ATENT întreaga conversație și extrage toate medicamentele și programările menționate.
 
-  const functionCallingPrompt = `Ești un asistent AI care extrage date structurate din conversații medicale.
+INSTRUCȚIUNI CRITICE:
+1. Analizează ÎNTREAGA conversație, nu doar ultimul mesaj
+2. Caută medicamente menționate explicit SAU implicit (ex: "poți lua X", "recomand Y", "ia Z")
+3. Caută programări menționate explicit SAU implicit (ex: "programează-te la", "consultație cu", "mergi la doctor")
+4. Extrage TOATE detaliile disponibile pentru fiecare medicament/programare
+5. Dacă nu găsești informații clare, returnează array-uri goale
 
-FUNCȚII DISPONIBILE:
-${functionsToCall.map(fnName => {
-  const fn = FUNCTION_DEFINITIONS[fnName];
-  return `- ${fn.name}: ${fn.description}
-  Parametri: ${JSON.stringify(fn.parameters, null, 2)}`;
-}).join('\n\n')}
-
-INSTRUCȚIUNI:
-1. Analizează conversația completă (inclusiv istoricul) pentru a înțelege contextul
-2. Dacă utilizatorul menționează medicamente, apelează funcția extract_medications
-3. Dacă utilizatorul menționează programări, apelează funcția extract_appointment
-4. Returnează DOAR JSON valid în formatul:
+FORMAT RĂSPUNS (DOAR JSON, fără text suplimentar):
 {
-  "function_calls": [
+  "medications": [
     {
-      "function": "nume_functie",
-      "arguments": { ... }
+      "medication_name": "Nume complet medicament (ex: Paracetamol, Omeprazol)",
+      "dosage": "Doza cu unitate (ex: 500mg, 20mg, 1000 UI)",
+      "frequency": "Frecvență (ex: 3x/zi, 1x/zi, dimineața, seara)"
+    }
+  ],
+  "appointments": [
+    {
+      "doctor_name": "Nume doctor (ex: Dr. Popescu Maria sau Nespecificat)",
+      "specialty": "Specialitate (ex: pediatrie, medicină generală, dermatologie)",
+      "clinic_name": "Nume clinică (ex: Clinica MedLife sau Nespecificat)",
+      "appointment_date": "Dată (ex: mâine, 15/11/2024, luni) sau null",
+      "appointment_time": "Oră (ex: 10:00, dimineața) sau null"
     }
   ]
 }
 
-CONVERSAȚIA:
-${conversationHistory.map(m => `${m.role}: ${m.content}`).join('\n')}
+CONVERSAȚIA COMPLETĂ:
+${fullConversation.map((m, idx) => `${idx + 1}. ${m.role.toUpperCase()}: ${m.content}`).join('\n\n')}
 
-RĂSPUNS ACTUAL: ${response}
-
-ÎNTREBAREA UTILIZATORULUI: ${question}
-
-Returnează DOAR JSON valid, fără text suplimentar.`;
+Analizează conversația de mai sus și extrage toate medicamentele și programările. Returnează DOAR JSON valid, fără explicații sau text suplimentar.`;
 
   try {
-    const extractionResponse = await callExternalLLM(functionCallingPrompt, [
-      { 
-        role: 'system', 
-        content: 'Ești un asistent care extrage date structurate din conversații medicale folosind funcții predefinite. Returnezi DOAR JSON valid în formatul specificat, fără explicații sau text suplimentar.' 
-      },
-      { role: 'user', content: functionCallingPrompt }
+    // Use a more structured system prompt for better extraction
+    const systemPrompt = `Ești un expert în extragerea de informații medicale structurate. 
+Returnezi DOAR JSON valid în formatul specificat, fără explicații, fără text suplimentar, fără markdown.
+Dacă nu găsești medicamente sau programări, returnează array-uri goale: {"medications": [], "appointments": []}`;
+
+    const extractionResponse = await callExternalLLM(extractionPrompt, [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: extractionPrompt }
     ]);
 
     if (extractionResponse) {
-      // Try to extract JSON from response
-      const jsonMatch = extractionResponse.match(/\{[\s\S]*\}/);
+      // Try multiple methods to extract JSON
+      let jsonText = extractionResponse.trim();
+      
+      // Remove markdown code blocks if present
+      jsonText = jsonText.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+      
+      // Try to find JSON object
+      const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         try {
           const parsed = JSON.parse(jsonMatch[0]);
           
-          // Process function calls
+          // Process extracted data - support multiple formats
           let medications = [];
           let appointments = [];
           
+          // Format 1: Direct medications/appointments arrays
+          if (parsed.medications && Array.isArray(parsed.medications)) {
+            medications = parsed.medications.filter(m => 
+              m && m.medication_name && m.dosage && m.frequency
+            );
+          }
+          
+          if (parsed.appointments && Array.isArray(parsed.appointments)) {
+            appointments = parsed.appointments.filter(apt => 
+              apt && (apt.doctor_name || apt.clinic_name || apt.specialty)
+            );
+          }
+          
+          // Format 2: Single appointment object
+          if (parsed.appointment && !Array.isArray(parsed.appointment)) {
+            const apt = parsed.appointment;
+            if (apt.doctor_name || apt.clinic_name || apt.specialty) {
+              appointments.push(apt);
+            }
+          }
+          
+          // Format 3: Function calls format (legacy support)
           if (parsed.function_calls && Array.isArray(parsed.function_calls)) {
             for (const call of parsed.function_calls) {
               if (call.function === 'extract_medications' && call.arguments?.medications) {
-                medications = call.arguments.medications.filter(m => 
-                  m.medication_name && m.dosage && m.frequency
+                const meds = call.arguments.medications.filter(m => 
+                  m && m.medication_name && m.dosage && m.frequency
                 );
+                medications = [...medications, ...meds];
               }
               if (call.function === 'extract_appointment' && call.arguments?.appointment) {
                 const apt = call.arguments.appointment;
@@ -873,24 +896,43 @@ Returnează DOAR JSON valid, fără text suplimentar.`;
                 }
               }
             }
-          } else if (parsed.medications) {
-            // Fallback: direct medications array
-            medications = parsed.medications;
-          } else if (parsed.appointment) {
-            // Fallback: direct appointment object
-            appointments = [parsed.appointment];
           }
           
+          // Clean and validate extracted data
+          medications = medications.map(med => ({
+            medication_name: String(med.medication_name || '').trim(),
+            dosage: String(med.dosage || '').trim(),
+            frequency: String(med.frequency || '').trim()
+          })).filter(med => med.medication_name && med.dosage && med.frequency);
+          
+          appointments = appointments.map(apt => ({
+            doctor_name: String(apt.doctor_name || 'Nespecificat').trim(),
+            specialty: String(apt.specialty || 'Medicină generală').trim(),
+            clinic_name: String(apt.clinic_name || 'Nespecificat').trim(),
+            appointment_date: apt.appointment_date ? String(apt.appointment_date).trim() : null,
+            appointment_time: apt.appointment_time ? String(apt.appointment_time).trim() : null
+          }));
+          
           const result = { medications, appointments };
-          console.log('[extract-fc] Function calling extraction successful:', result);
+          console.log('[extract-ai] AI extraction successful:', {
+            medications_count: medications.length,
+            appointments_count: appointments.length,
+            medications: medications,
+            appointments: appointments
+          });
           return result;
         } catch (parseError) {
-          console.warn('[extract-fc] Failed to parse function call JSON:', parseError.message);
+          console.warn('[extract-ai] Failed to parse JSON:', parseError.message);
+          console.warn('[extract-ai] Raw response:', extractionResponse.slice(0, 500));
         }
+      } else {
+        console.warn('[extract-ai] No JSON found in response');
+        console.warn('[extract-ai] Raw response:', extractionResponse.slice(0, 500));
       }
     }
   } catch (e) {
-    console.warn('[extract-fc] Function calling extraction failed:', e.message);
+    console.warn('[extract-ai] AI extraction failed:', e.message);
+    console.warn('[extract-ai] Error stack:', e.stack);
   }
 
   return { medications: [], appointments: [] };
@@ -1179,50 +1221,38 @@ TON: Profesional dar prietenos, empatic, clar și pe înțelesul oricui.`;
           }
         }
 
-        // Extract structured data from LLM response using multi-tier approach
-        // Tier 1: Fast regex/JSON extraction
-        let extractedData = {
-          medications: extractMedications(answer, question),
-          appointments: extractAppointments(answer, question)
-        };
-
-        // Tier 2: AI-powered function calling extraction (more precise)
-        // Use this if regex failed or if we want higher precision
-        const lowerAnswer = answer.toLowerCase();
-        const shouldTryFunctionCalling = 
-          // Always try function calling for better precision, or if regex failed
-          process.env.USE_FUNCTION_CALLING === 'true' ||
-          (extractedData.medications.length === 0 && extractedData.appointments.length === 0) ||
-          (question.toLowerCase().includes('pastil') || question.toLowerCase().includes('medicament') || 
-           question.toLowerCase().includes('programare') || question.toLowerCase().includes('consultație') ||
-           question.toLowerCase().includes('dermatolog') || question.toLowerCase().includes('medic') ||
-           lowerAnswer.includes('programat') || lowerAnswer.includes('consultație') ||
-           lowerAnswer.includes('medicament') || lowerAnswer.includes('pastil'));
+        // Extract structured data from LLM response using AI-first approach
+        // PRIMARY METHOD: Use AI/LLM for extraction (most accurate)
+        // FALLBACK: Use regex patterns if AI fails
         
-        if (shouldTryFunctionCalling) {
-          console.log('[extract] Using function calling extraction for better precision...');
-          // Get conversation history for context
-          const conversationHistory = Array.isArray(payload.messages) 
-            ? payload.messages.filter(m => m.role !== 'system').slice(0, -1)
-            : [];
+        let extractedData = { medications: [], appointments: [] };
+        
+        // Get conversation history for better context
+        const conversationHistory = Array.isArray(payload.messages) 
+          ? payload.messages.filter(m => m.role !== 'system').slice(0, -1)
+          : [];
+        
+        // PRIMARY: Always try AI extraction first (most accurate)
+        console.log('[extract] Using AI extraction as primary method...');
+        const aiExtracted = await extractWithFunctionCalling(answer, question, conversationHistory);
+        
+        if (aiExtracted.medications.length > 0 || aiExtracted.appointments.length > 0) {
+          // AI extraction succeeded - use it
+          extractedData = aiExtracted;
+          console.log('[extract] AI extraction successful - using AI results');
+        } else {
+          // AI extraction returned nothing - try regex as fallback
+          console.log('[extract] AI extraction returned no results, trying regex fallback...');
+          const regexExtracted = {
+            medications: extractMedications(answer, question),
+            appointments: extractAppointments(answer, question)
+          };
           
-          const fcExtracted = await extractWithFunctionCalling(answer, question, conversationHistory);
-          
-          // Merge results (function calling takes priority)
-          if (fcExtracted.medications.length > 0 || fcExtracted.appointments.length > 0) {
-            extractedData = {
-              medications: fcExtracted.medications.length > 0 ? fcExtracted.medications : extractedData.medications,
-              appointments: fcExtracted.appointments.length > 0 ? fcExtracted.appointments : extractedData.appointments
-            };
-            console.log('[extract] Function calling extraction successful');
-          } else if (extractedData.medications.length === 0 && extractedData.appointments.length === 0) {
-            // Fallback to legacy LLM extraction if function calling failed
-            console.log('[extract] Function calling returned no results, trying legacy LLM extraction...');
-            const llmExtracted = await extractWithLLM(answer, question);
-            if (llmExtracted.medications.length > 0 || llmExtracted.appointments.length > 0) {
-              extractedData = llmExtracted;
-              console.log('[extract] Legacy LLM extraction successful');
-            }
+          if (regexExtracted.medications.length > 0 || regexExtracted.appointments.length > 0) {
+            extractedData = regexExtracted;
+            console.log('[extract] Regex fallback found results');
+          } else {
+            console.log('[extract] No medications or appointments detected by either method');
           }
         }
 

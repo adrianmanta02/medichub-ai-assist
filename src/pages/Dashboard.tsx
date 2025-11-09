@@ -63,15 +63,19 @@ const Dashboard = () => {
   }, [navigate]);
 
   const loadUserData = async (userId: string, showNotifications = false) => {
-    // Load medications
-    const { data: meds } = await supabase
+    // Load medications - ordered by most recent first
+    const { data: meds, error: medsError } = await supabase
       .from('user_medications')
       .select('*')
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
     
+    if (medsError) {
+      console.error('Error loading medications:', medsError);
+    }
+    
     if (meds) {
-      // Check if new medications were added
+      // Check if new medications were added (only show notification if explicitly requested)
       if (showNotifications && meds.length > medications.length) {
         const newMeds = meds.slice(0, meds.length - medications.length);
         newMeds.forEach(med => {
@@ -82,19 +86,25 @@ const Dashboard = () => {
           });
         });
       }
+      // Always update medications state for real-time updates
       setMedications(meds);
     }
 
-    // Load next appointment
-    const { data: appointments } = await supabase
+    // Load next appointment - get the earliest upcoming appointment
+    const { data: appointments, error: aptsError } = await supabase
       .from('user_appointments')
       .select('*')
       .eq('user_id', userId)
       .order('appointment_date', { ascending: true })
+      .order('appointment_time', { ascending: true })
       .limit(1);
     
+    if (aptsError) {
+      console.error('Error loading appointments:', aptsError);
+    }
+    
     if (appointments && appointments.length > 0) {
-      // Check if appointment was updated
+      // Check if appointment was updated (only show notification if explicitly requested)
       if (showNotifications && (!appointment || appointment.id !== appointments[0].id)) {
         toast({
           title: "📅 Programare actualizată",
@@ -102,6 +112,7 @@ const Dashboard = () => {
           duration: 3000,
         });
       }
+      // Always update appointment state for real-time updates
       setAppointment(appointments[0]);
     } else {
       setAppointment(null);
@@ -118,7 +129,8 @@ const Dashboard = () => {
         { event: '*', schema: 'public', table: 'user_medications', filter: `user_id=eq.${user.id}` },
         (payload) => {
           console.log('[realtime] Medication change:', payload.eventType);
-          loadUserData(user.id, true); // Show notifications for real-time updates
+          // Reload data to update cards - notifications are handled by AIAssistant
+          loadUserData(user.id, false); // Don't show duplicate notifications
         }
       )
       .subscribe();
@@ -129,7 +141,8 @@ const Dashboard = () => {
         { event: '*', schema: 'public', table: 'user_appointments', filter: `user_id=eq.${user.id}` },
         (payload) => {
           console.log('[realtime] Appointment change:', payload.eventType);
-          loadUserData(user.id, true); // Show notifications for real-time updates
+          // Reload data to update cards - notifications are handled by AIAssistant
+          loadUserData(user.id, false); // Don't show duplicate notifications
         }
       )
       .subscribe();
@@ -276,6 +289,9 @@ const Dashboard = () => {
                 onToggle={() => setIsVoiceActive(!isVoiceActive)}
                 onCommand={handleVoiceCommand}
               />
+              <Button variant="ghost" size="icon" onClick={() => navigate("/profile")} title="Profil">
+                <User className="w-5 h-5" />
+              </Button>
               <Button variant="ghost" size="icon" className="relative">
                 <Bell className="w-5 h-5" />
                 <span className="absolute top-1 right-1 w-2 h-2 bg-destructive rounded-full" />
@@ -381,32 +397,56 @@ const Dashboard = () => {
 
           {/* Sidebar */}
           <div className="space-y-4">
-            <Card className="p-6 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
+            <Card className="p-6 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1 Urmatoarea consultatie">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
                 <Activity className="w-5 h-5 text-primary" />
                 Următoarea consultație
               </h3>
               {appointment ? (
                 <div className="space-y-3">
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <p className="font-medium">{appointment.doctor_name}</p>
-                      <p className="text-sm text-muted-foreground">{appointment.specialty}</p>
+                  <div className="p-3 rounded-lg border border-border/50 bg-card/50">
+                    <div className="space-y-3">
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-1">Doctor</p>
+                        <p className="font-semibold text-sm">{appointment.doctor_name}</p>
+                      </div>
+                      
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-1">Specialitate</p>
+                        <Badge variant="secondary" className="text-xs">{appointment.specialty}</Badge>
+                      </div>
+                      
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-1">Clinică</p>
+                        <p className="text-sm font-medium">{appointment.clinic_name}</p>
+                      </div>
+                      
+                      {appointment.appointment_date && (
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1">Data</p>
+                          <Badge variant="outline" className="text-xs">
+                            {appointment.appointment_date}
+                          </Badge>
+                        </div>
+                      )}
+                      
+                      {appointment.appointment_time && (
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1">Ora</p>
+                          <Badge variant="outline" className="text-xs">
+                            {appointment.appointment_time}
+                          </Badge>
+                        </div>
+                      )}
                     </div>
-                    {appointment.appointment_date && (
-                      <Badge variant="secondary">
-                        {appointment.appointment_date}
-                      </Badge>
-                    )}
                   </div>
-                  <div className="text-sm">
-                    {appointment.appointment_time && (
-                      <p className="text-muted-foreground">Ora: {appointment.appointment_time}</p>
-                    )}
-                    <p className="text-muted-foreground">{appointment.clinic_name}</p>
-                  </div>
-                  <Button size="sm" className="w-full">
-                    Vezi detalii
+                  
+                  <Button 
+                    size="sm" 
+                    className="w-full"
+                    onClick={() => navigate("/appointments")}
+                  >
+                    Vezi toate consultațiile
                   </Button>
                 </div>
               ) : (
@@ -418,25 +458,37 @@ const Dashboard = () => {
               )}
             </Card>
 
-            <Card className="p-6 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
+            <Card className="p-6 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1 Medicatie">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
                 <Clock className="w-5 h-5 text-accent" />
                 Medicație
               </h3>
               {medications.length > 0 ? (
-                <div className="space-y-3">
+                <div className="space-y-3 max-h-[400px] overflow-y-auto">
                   {medications.map((med, idx) => (
-                    <div key={idx} className="flex items-center justify-between">
-                      <div>
-                        <p className="font-medium text-sm">{med.medication_name}</p>
-                        <p className="text-xs text-muted-foreground">{med.dosage}, {med.frequency}</p>
+                    <div key={med.id || idx} className="p-3 rounded-lg border border-border/50 bg-card/50 hover:bg-card transition-colors">
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div className="flex-1">
+                          <p className="font-semibold text-sm mb-1">{med.medication_name}</p>
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-muted-foreground">Doza:</span>
+                              <Badge variant="secondary" className="text-xs">{med.dosage}</Badge>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-muted-foreground">Frecvență:</span>
+                              <Badge variant="outline" className="text-xs">
+                                {med.frequency.includes('dimineața') ? 'Dimineața' : 
+                                 med.frequency.includes('seara') ? 'Seara' : 
+                                 med.frequency.includes('1x/zi') ? 'O dată pe zi' :
+                                 med.frequency.includes('2x/zi') ? 'De 2 ori pe zi' :
+                                 med.frequency.includes('3x/zi') ? 'De 3 ori pe zi' :
+                                 med.frequency}
+                              </Badge>
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      <Badge variant="outline">
-                        {med.frequency.includes('dimineața') ? 'Dimineața' : 
-                         med.frequency.includes('seara') ? 'Seara' : 
-                         med.frequency.includes('12') ? '12:00' : 
-                         med.frequency}
-                      </Badge>
                     </div>
                   ))}
                 </div>

@@ -3,7 +3,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Send, Bot, User, Sparkles } from "lucide-react";
+import { Send, Bot, User, Sparkles, Pill, Calendar } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 
@@ -12,6 +12,20 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   timestamp: Date;
+  extractedData?: {
+    medications?: Array<{
+      medication_name: string;
+      dosage: string;
+      frequency: string;
+    }>;
+    appointments?: Array<{
+      doctor_name: string;
+      specialty: string;
+      clinic_name: string;
+      appointment_date?: string | null;
+      appointment_time?: string | null;
+    }>;
+  };
 }
 
 export interface AIAssistantHandle {
@@ -116,29 +130,41 @@ const AIAssistant = forwardRef<AIAssistantHandle>((props, ref) => {
       // Save extracted medications and appointments to Supabase
       if (payload.extractedData) {
         const { medications, appointments } = payload.extractedData;
+        const answerText = (payload.answer || '').toLowerCase();
         
         // Get current user
         const { data: { session } } = await supabase.auth.getSession();
         if (session?.user) {
-          // Save medications
+          // Save medications - verify they appear in LLM response text
           if (medications && medications.length > 0) {
-            let savedCount = 0;
-            for (const med of medications) {
-              const { error } = await supabase.from('user_medications').insert({
-                user_id: session.user.id,
-                medication_name: med.medication_name,
-                dosage: med.dosage,
-                frequency: med.frequency
-              });
-              if (!error) savedCount++;
-            }
+            // Filter medications to only include those that appear in the LLM response
+            const validMedications = medications.filter(med => {
+              const medNameLower = med.medication_name.toLowerCase();
+              // Check if medication name appears in the answer text
+              return answerText.includes(medNameLower) || 
+                     answerText.includes(medNameLower.split(' ')[0]); // Check first word if multi-word
+            });
             
-            if (savedCount > 0) {
-              toast({
-                title: "💊 Medicament adăugat",
-                description: `${savedCount} medicament${savedCount > 1 ? 'e' : ''} ${savedCount > 1 ? 'au fost' : 'a fost'} adăugat${savedCount > 1 ? 'e' : ''} în secțiunea Medicație`,
-                duration: 4000,
-              });
+            if (validMedications.length > 0) {
+              let savedCount = 0;
+              for (const med of validMedications) {
+                const { error } = await supabase.from('user_medications').insert({
+                  user_id: session.user.id,
+                  medication_name: med.medication_name,
+                  dosage: med.dosage,
+                  frequency: med.frequency
+                });
+                if (!error) savedCount++;
+              }
+              
+              if (savedCount > 0) {
+                // Show notification in bottom right
+                toast({
+                  title: "💊 Medicament identificat",
+                  description: `${savedCount} medicament${savedCount > 1 ? 'e' : ''} ${savedCount > 1 ? 'au fost' : 'a fost'} identificat${savedCount > 1 ? 'e' : ''} și ${savedCount > 1 ? 'au fost' : 'a fost'} adăugat${savedCount > 1 ? 'e' : ''} în lista de Medicație`,
+                  duration: 5000,
+                });
+              }
             }
           }
 
@@ -163,10 +189,11 @@ const AIAssistant = forwardRef<AIAssistantHandle>((props, ref) => {
             
             if (savedCount > 0) {
               const apt = appointments[0];
+              // Show notification in bottom right
               toast({
-                title: "📅 Programare adăugată",
-                description: `Programare cu ${apt.doctor_name} la ${apt.clinic_name} a fost adăugată`,
-                duration: 4000,
+                title: "📅 Programare identificată",
+                description: `Programarea cu ${apt.doctor_name} la ${apt.clinic_name} a fost identificată și adăugată în lista de Următoarea consultație`,
+                duration: 5000,
               });
             }
           }
@@ -178,6 +205,7 @@ const AIAssistant = forwardRef<AIAssistantHandle>((props, ref) => {
         role: 'assistant',
         content: payload.answer || 'Nu am găsit un răspuns.',
         timestamp: new Date(),
+        extractedData: payload.extractedData || undefined,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -353,6 +381,51 @@ const AIAssistant = forwardRef<AIAssistantHandle>((props, ref) => {
                   }`}
               >
                 <p className="text-sm whitespace-pre-line">{message.content}</p>
+                
+                {/* Visual hints for medications and appointments */}
+                {message.extractedData && message.role === "assistant" && (
+                  <div className="mt-3 pt-3 border-t border-border/50 space-y-2">
+                    {message.extractedData.medications && message.extractedData.medications.length > 0 && (
+                      <div className="Medicatie flex items-start gap-2 p-2 rounded-lg bg-primary/10 border border-primary/20">
+                        <Pill className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
+                        <div className="flex-1">
+                          <Badge variant="outline" className="mb-1 text-xs">
+                            💊 Medicament detectat
+                          </Badge>
+                          <div className="space-y-1">
+                            {message.extractedData.medications.map((med, idx) => (
+                              <p key={idx} className="text-xs text-muted-foreground">
+                                <span className="font-medium">{med.medication_name}</span> - {med.dosage}, {med.frequency}
+                              </p>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {message.extractedData.appointments && message.extractedData.appointments.length > 0 && (
+                      <div className="Urmatoarea consultatie flex items-start gap-2 p-2 rounded-lg bg-accent/10 border border-accent/20">
+                        <Calendar className="w-4 h-4 text-accent mt-0.5 flex-shrink-0" />
+                        <div className="flex-1">
+                          <Badge variant="outline" className="mb-1 text-xs">
+                            📅 Programare detectată
+                          </Badge>
+                          <div className="space-y-1">
+                            {message.extractedData.appointments.map((apt, idx) => (
+                              <div key={idx} className="text-xs text-muted-foreground">
+                                <p className="font-medium">{apt.doctor_name}</p>
+                                <p>{apt.specialty} - {apt.clinic_name}</p>
+                                {apt.appointment_date && (
+                                  <p className="text-primary">📆 {apt.appointment_date}{apt.appointment_time ? ` la ${apt.appointment_time}` : ''}</p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <p className="text-xs text-muted-foreground mt-1">
                 {message.timestamp.toLocaleTimeString("ro-RO", {
