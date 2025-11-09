@@ -797,31 +797,75 @@ async function extractWithFunctionCalling(response, question, conversationHistor
     { role: 'assistant', content: response }
   ];
 
-  const extractionPrompt = `Ești un expert în extragerea de informații medicale structurate din conversații. Analizează ATENT întreaga conversație și extrage toate medicamentele și programările menționate.
+  const extractionPrompt = `Ești un expert în extragerea de informații medicale structurate din conversații. Analizează ATENT conversația și extrage DOAR medicamentele și programările care sunt CLAR și EXPLICIT menționate.
 
-INSTRUCȚIUNI CRITICE:
-1. Analizează ÎNTREAGA conversație, nu doar ultimul mesaj
-2. Caută medicamente menționate explicit SAU implicit (ex: "poți lua X", "recomand Y", "ia Z")
-3. Caută programări menționate explicit SAU implicit (ex: "programează-te la", "consultație cu", "mergi la doctor")
-4. Extrage TOATE detaliile disponibile pentru fiecare medicament/programare
-5. Dacă nu găsești informații clare, returnează array-uri goale
+REGULI STRICTE DE DETECȚIE:
+
+PENTRU MEDICAMENTE - Extrage DOAR dacă:
+✅ Se menționează EXPLICIT un medicament cu nume clar (ex: Paracetamol, Omeprazol, Ibuprofen)
+✅ Se menționează doza EXACTĂ (ex: 500mg, 20mg, 1000 UI)
+✅ Se menționează frecvența EXACTĂ (ex: 3x/zi, 1x/zi, dimineața, seara)
+✅ Este o RECOMANDARE CONCRETĂ, nu doar o mențiune generică
+
+❌ NU extrage dacă:
+- Se menționează doar "medicament" fără nume specific
+- Se menționează doar "pastile" fără detalii
+- Se discută despre medicamente în general, fără recomandare concretă
+- Se menționează un medicament dar fără doză sau frecvență clară
+- Este doar o întrebare despre medicamente, nu o recomandare
+
+PENTRU PROGRAMĂRI - Extrage DOAR dacă:
+✅ Se menționează EXPLICIT o programare CONCRETĂ (ex: "programează-te la", "consultație programată", "ai programare")
+✅ Se menționează un doctor/clinică SPECIFICĂ sau o specialitate CONCRETĂ
+✅ Se menționează o dată/oră SPECIFICĂ sau relativă clară (ex: mâine, luni, 15/11/2024)
+
+❌ NU extrage dacă:
+- Se menționează doar "ar trebui să mergi la doctor" (sugestie generică)
+- Se discută despre clinici în general, fără programare concretă
+- Se menționează doar o specialitate fără programare (ex: "ai nevoie de un cardiolog" fără programare)
+- Este doar o recomandare să consulte un medic, nu o programare efectivă
+- Se menționează "doctor" sau "clinică" doar în context informativ
+
+EXEMPLE CORECTE DE EXTRAGERE:
+
+✅ MEDICAMENTE:
+- "Poți lua Paracetamol 500mg de 3 ori pe zi pentru durere"
+  → {"medications": [{"medication_name": "Paracetamol", "dosage": "500mg", "frequency": "3x/zi"}]}
+
+- "Recomand Omeprazol 20mg dimineața, înainte de mese"
+  → {"medications": [{"medication_name": "Omeprazol", "dosage": "20mg", "frequency": "dimineața"}]}
+
+✅ PROGRAMĂRI:
+- "Programează-te la Dr. Popescu Maria, cardiolog, mâine la 10:00 la Clinica MedLife"
+  → {"appointments": [{"doctor_name": "Dr. Popescu Maria", "specialty": "cardiologie", "clinic_name": "Clinica MedLife", "appointment_date": "mâine", "appointment_time": "10:00"}]}
+
+- "Ai programare la pediatru, luni dimineața"
+  → {"appointments": [{"doctor_name": "Nespecificat", "specialty": "pediatrie", "clinic_name": "Nespecificat", "appointment_date": "luni", "appointment_time": "dimineața"}]}
+
+❌ EXEMPLE INCORECTE (NU EXTRAGE):
+
+- "Ar trebui să mergi la un cardiolog" → NU (doar sugestie, nu programare)
+- "Poți lua medicamente pentru durere" → NU (fără nume, doză, frecvență)
+- "Există clinici bune în zonă" → NU (doar informație, nu programare)
+- "Medicamentele pot ajuta" → NU (discuție generică)
+- "Doctorul poate recomanda tratament" → NU (nu e programare concretă)
 
 FORMAT RĂSPUNS (DOAR JSON, fără text suplimentar):
 {
   "medications": [
     {
       "medication_name": "Nume complet medicament (ex: Paracetamol, Omeprazol)",
-      "dosage": "Doza cu unitate (ex: 500mg, 20mg, 1000 UI)",
-      "frequency": "Frecvență (ex: 3x/zi, 1x/zi, dimineața, seara)"
+      "dosage": "Doza cu unitate (ex: 500mg, 20mg)",
+      "frequency": "Frecvență (ex: 3x/zi, 1x/zi, dimineața)"
     }
   ],
   "appointments": [
     {
-      "doctor_name": "Nume doctor (ex: Dr. Popescu Maria sau Nespecificat)",
-      "specialty": "Specialitate (ex: pediatrie, medicină generală, dermatologie)",
-      "clinic_name": "Nume clinică (ex: Clinica MedLife sau Nespecificat)",
-      "appointment_date": "Dată (ex: mâine, 15/11/2024, luni) sau null",
-      "appointment_time": "Oră (ex: 10:00, dimineața) sau null"
+      "doctor_name": "Nume doctor sau Nespecificat",
+      "specialty": "Specialitate (ex: pediatrie, cardiologie)",
+      "clinic_name": "Nume clinică sau Nespecificat",
+      "appointment_date": "Dată specifică sau null",
+      "appointment_time": "Oră specifică sau null"
     }
   ]
 }
@@ -829,13 +873,19 @@ FORMAT RĂSPUNS (DOAR JSON, fără text suplimentar):
 CONVERSAȚIA COMPLETĂ:
 ${fullConversation.map((m, idx) => `${idx + 1}. ${m.role.toUpperCase()}: ${m.content}`).join('\n\n')}
 
-Analizează conversația de mai sus și extrage toate medicamentele și programările. Returnează DOAR JSON valid, fără explicații sau text suplimentar.`;
+Analizează conversația de mai sus și extrage DOAR medicamentele și programările care sunt CLAR și EXPLICIT menționate. Dacă nu găsești informații clare și concrete, returnează array-uri goale. Returnează DOAR JSON valid, fără explicații sau text suplimentar, fără markdown.`;
 
   try {
-    // Use a more structured system prompt for better extraction
+    // Use a more structured system prompt for better extraction - STRICT MODE
     const systemPrompt = `Ești un expert în extragerea de informații medicale structurate. 
-Returnezi DOAR JSON valid în formatul specificat, fără explicații, fără text suplimentar, fără markdown.
-Dacă nu găsești medicamente sau programări, returnează array-uri goale: {"medications": [], "appointments": []}`;
+Ai o responsabilitate CRITICĂ: extragi DOAR informații CLARE și EXPLICITE.
+
+REGULI STRICTE:
+- Pentru medicamente: DOAR dacă există nume + doză + frecvență CLARE
+- Pentru programări: DOAR dacă există o programare CONCRETĂ (nu doar sugestii generice)
+- Dacă ești în dubiu, NU extrage - mai bine array gol decât fals pozitiv
+- Returnezi DOAR JSON valid, fără explicații, fără text suplimentar, fără markdown
+- Dacă nu găsești informații CLARE și CONCRETE, returnează: {"medications": [], "appointments": []}`;
 
     const extractionResponse = await callExternalLLM(extractionPrompt, [
       { role: 'system', content: systemPrompt },
@@ -898,12 +948,24 @@ Dacă nu găsești medicamente sau programări, returnează array-uri goale: {"m
             }
           }
           
-          // Clean and validate extracted data
+          // Clean and validate extracted data - STRICT VALIDATION
           medications = medications.map(med => ({
             medication_name: String(med.medication_name || '').trim(),
             dosage: String(med.dosage || '').trim(),
             frequency: String(med.frequency || '').trim()
-          })).filter(med => med.medication_name && med.dosage && med.frequency);
+          })).filter(med => {
+            // STRICT: Must have all three fields and they must be meaningful
+            if (!med.medication_name || !med.dosage || !med.frequency) return false;
+            // Reject generic names
+            const genericNames = ['medicament', 'pastilă', 'pastile', 'medicamentul', 'medicamentelor'];
+            if (genericNames.includes(med.medication_name.toLowerCase())) return false;
+            // Reject if dosage doesn't contain numbers or units
+            if (!/\d/.test(med.dosage) && !/(mg|ml|ui|g|kg)/i.test(med.dosage)) return false;
+            // Reject if frequency is too generic
+            const genericFreq = ['când', 'după', 'înainte', 'dacă'];
+            if (genericFreq.some(g => med.frequency.toLowerCase().includes(g) && med.frequency.length < 10)) return false;
+            return true;
+          });
           
           appointments = appointments.map(apt => ({
             doctor_name: String(apt.doctor_name || 'Nespecificat').trim(),
@@ -911,7 +973,15 @@ Dacă nu găsești medicamente sau programări, returnează array-uri goale: {"m
             clinic_name: String(apt.clinic_name || 'Nespecificat').trim(),
             appointment_date: apt.appointment_date ? String(apt.appointment_date).trim() : null,
             appointment_time: apt.appointment_time ? String(apt.appointment_time).trim() : null
-          }));
+          })).filter(apt => {
+            // STRICT: Must have at least specialty OR (doctor_name AND not "Nespecificat") OR (clinic_name AND not "Nespecificat")
+            // Reject if all fields are generic/unspecified
+            const hasSpecificDoctor = apt.doctor_name && apt.doctor_name !== 'Nespecificat' && apt.doctor_name.length > 3;
+            const hasSpecificClinic = apt.clinic_name && apt.clinic_name !== 'Nespecificat' && apt.clinic_name.length > 3;
+            const hasSpecificSpecialty = apt.specialty && apt.specialty !== 'Medicină generală' && apt.specialty.length > 3;
+            // Must have at least one specific field OR date/time indicating actual appointment
+            return hasSpecificDoctor || hasSpecificClinic || hasSpecificSpecialty || apt.appointment_date || apt.appointment_time;
+          });
           
           const result = { medications, appointments };
           console.log('[extract-ai] AI extraction successful:', {
@@ -979,6 +1049,7 @@ const server = http.createServer((req, res) => {
         const payload = JSON.parse(body || '{}');
         const lastMessage = Array.isArray(payload.messages) ? payload.messages[payload.messages.length - 1] : null;
         const question = lastMessage?.content || payload.question || '';
+        const userMood = payload.userMood || null; // Get user's current mood from facial recognition
 
         // Emergency detection removed - let the LLM handle it naturally
         // if (emergencyDetected(question)) {
@@ -1093,56 +1164,42 @@ INSTRUCȚIUNI IMPORTANTE:
    - Recomandă clinica cea mai potrivită (distanță mică, rating bun, timp așteptare scăzut)
    - Menționează concret numele, adresa, timpul de așteptare și rating-ul
    - Explică de ce ai ales acea clinică
-4. Dacă utilizatorul întreabă despre medicamente/pastile:
-   - La FINALUL răspunsului, adaugă un JSON structurat cu medicamentele recomandate:
+4. MEDICAMENTE - REGULI CRITICE:
+   - Dacă menționezi, recomanzi sau sugerezi ORICE medicament în răspunsul tău, TREBUIE să adaugi la FINALUL răspunsului un JSON structurat
+   - Acest lucru se aplică CHIAR DACĂ utilizatorul nu cere explicit medicamente (ex: dacă recomanzi Paracetamol pentru durere)
+   - Format OBLIGATORIU la finalul răspunsului:
      [MEDICATIONS]
      {
        "medications": [
          {
-           "medication_name": "Nume Medicament",
-           "dosage": "doză (ex: 20mg, 500mg, 1000 UI)",
-           "frequency": "frecvență (ex: 1x/zi, 3x/zi, dimineața, seara)"
+           "medication_name": "Nume complet medicament (ex: Paracetamol, Omeprazol, Ibuprofen)",
+           "dosage": "Doza exactă cu unitate (ex: 500mg, 20mg, 1000 UI)",
+           "frequency": "Frecvență exactă (ex: 3x/zi, 1x/zi, dimineața, seara, la 6 ore)"
          }
        ]
      }
      [/MEDICATIONS]
-   - Exemplu: Dacă recomanzi "Poți lua Omeprazol 20 mg, de 1 ori pe zi", adaugă la final:
-     [MEDICATIONS]
-     {
-       "medications": [
-         {
-           "medication_name": "Omeprazol",
-           "dosage": "20mg",
-           "frequency": "1x/zi"
-         }
-       ]
-     }
-     [/MEDICATIONS]
-5. Dacă utilizatorul vrea să programeze o consultație:
-   - La FINALUL răspunsului, adaugă un JSON structurat cu programarea:
+   - IMPORTANT: Extrage informațiile din răspunsul tău natural. Dacă spui "Poți lua Paracetamol 500mg de 3 ori pe zi", JSON-ul trebuie să conțină exact aceste informații
+   - Dacă menționezi mai multe medicamente, adaugă-le pe toate în array
+   - Dacă NU menționezi medicamente în răspuns, NU adăuga blocul [MEDICATIONS]
+
+5. PROGRAMĂRI - REGULI CRITICE:
+   - Dacă menționezi, sugerezi sau programezi ORICE consultație medicală în răspunsul tău, TREBUIE să adaugi la FINALUL răspunsului un JSON structurat
+   - Acest lucru se aplică CHIAR DACĂ utilizatorul nu cere explicit programare (ex: dacă sugerezi "ar trebui să mergi la un cardiolog")
+   - Format OBLIGATORIU la finalul răspunsului:
      [APPOINTMENT]
      {
        "appointment": {
-         "doctor_name": "Dr. Nume Prenume",
-         "specialty": "specialitate (ex: medicină generală, pediatrie)",
-         "clinic_name": "Nume Clinică",
-         "appointment_date": "dată (ex: mâine, 15/11/2024, luni)",
-         "appointment_time": "oră (ex: 10:00, dimineața)"
+         "doctor_name": "Dr. Nume Prenume sau Nespecificat",
+         "specialty": "Specialitate exactă (ex: medicină generală, pediatrie, cardiologie, dermatologie)",
+         "clinic_name": "Nume clinică sau Nespecificat",
+         "appointment_date": "Dată (ex: mâine, 15/11/2024, luni, poimâine) sau null",
+         "appointment_time": "Oră (ex: 10:00, dimineața, seara) sau null"
        }
      }
      [/APPOINTMENT]
-   - Exemplu: Dacă programezi consultație, adaugă la final:
-     [APPOINTMENT]
-     {
-       "appointment": {
-         "doctor_name": "Dr. Popescu Maria",
-         "specialty": "pediatrie",
-         "clinic_name": "Clinica MedLife",
-         "appointment_date": "mâine",
-         "appointment_time": "10:00"
-       }
-     }
-     [/APPOINTMENT]
+   - IMPORTANT: Extrage informațiile din răspunsul tău natural. Dacă spui "Programează-te la Dr. Popescu, pediatru, mâine la 10:00", JSON-ul trebuie să conțină exact aceste informații
+   - Dacă NU menționezi programări în răspuns, NU adăuga blocul [APPOINTMENT]
 6. Dacă utilizatorul are simptome:
    - Sugerează măsuri generale (hidratare, odihnă, medicamente uzuale)
    - Indică când ar trebui să consulte un medic
@@ -1158,7 +1215,34 @@ TON: Profesional dar prietenos, empatic, clar și pe înțelesul oricui.`;
           return fs.readFileSync(promptFile, "utf8");
         }
 
-        const systemPrompt = loadSystemPrompt();
+        let systemPrompt = loadSystemPrompt();
+        
+        // Add mood-adaptive instructions to system prompt if mood is detected
+        if (userMood) {
+          const moodAdaptiveRules = `
+
+REGULI ADAPTIVE BAZATE PE STARE EMOȚIONALĂ:
+Starea emoțională detectată a utilizatorului: ${userMood}
+
+${userMood === 'happy' ? `
+- Ton: Energetic, prietenos, pozitiv
+- Stil: Entuziast, încurajator, plin de energie
+- Exemplu: "Ce veste minunată! 😄 Vrei să continui să discutăm despre nutriție sau mai degrabă despre cum să-ți menții energia?"
+` : userMood === 'calm' ? `
+- Ton: Reasigurător, stabil, clar
+- Stil: Calm, echilibrat, profesional
+- Exemplu: "Perfect, să discutăm despre asta într-un mod clar și structurat."
+` : userMood === 'sad' || userMood === 'anxious' || userMood === 'tired' ? `
+- Ton: Blând, empatic, reconfortant
+- Stil: Sensibil, înțelegător, suportiv
+- Sugestii: Oferă mici acțiuni de bunăstare, fii răbdător
+- Exemplu: "Îmi pare rău să văd că ești ${userMood === 'sad' ? 'trist' : userMood === 'anxious' ? 'anxios' : 'obosit'} 😔. Vrei să facem împreună o mică verificare rapidă a programărilor tale sau doar să stăm de vorbă puțin?"
+` : ''}
+
+IMPORTANT: Adaptează-ți răspunsul la starea emoțională detectată, dar menține profesionalismul medical.`;
+
+          systemPrompt = systemPrompt + moodAdaptiveRules;
+        }
         
         // Build messages array for chat API
         const messagesForLLM = [];
@@ -1233,27 +1317,17 @@ TON: Profesional dar prietenos, empatic, clar și pe înțelesul oricui.`;
           : [];
         
         // PRIMARY: Always try AI extraction first (most accurate)
-        console.log('[extract] Using AI extraction as primary method...');
+        // NO REGEX FALLBACK - AI extraction is the only method to avoid false positives
+        console.log('[extract] Using AI extraction as PRIMARY and ONLY method (no regex fallback to avoid false positives)...');
         const aiExtracted = await extractWithFunctionCalling(answer, question, conversationHistory);
         
+        // Use AI extraction results - it's strict enough to avoid false positives
+        extractedData = aiExtracted;
+        
         if (aiExtracted.medications.length > 0 || aiExtracted.appointments.length > 0) {
-          // AI extraction succeeded - use it
-          extractedData = aiExtracted;
-          console.log('[extract] AI extraction successful - using AI results');
+          console.log('[extract] AI extraction successful - using AI results (strict mode)');
         } else {
-          // AI extraction returned nothing - try regex as fallback
-          console.log('[extract] AI extraction returned no results, trying regex fallback...');
-          const regexExtracted = {
-            medications: extractMedications(answer, question),
-            appointments: extractAppointments(answer, question)
-          };
-          
-          if (regexExtracted.medications.length > 0 || regexExtracted.appointments.length > 0) {
-            extractedData = regexExtracted;
-            console.log('[extract] Regex fallback found results');
-          } else {
-            console.log('[extract] No medications or appointments detected by either method');
-          }
+          console.log('[extract] AI extraction returned no results - this is correct if no clear medications/appointments were mentioned');
         }
 
         // Log extraction results for debugging

@@ -9,6 +9,8 @@ import AIAssistant from "@/components/dashboard/AIAssistant";
 import VoiceControl from "@/components/dashboard/VoiceControl";
 import NotificationPanel from "@/components/dashboard/NotificationPanel";
 import DocumentScanner from "@/components/dashboard/DocumentScanner";
+import { FaceEmotionDetector } from "@/components/dashboard/FaceEmotionDetector";
+import { Emotion } from "@/hooks/useFaceEmotion";
 import { supabase } from "@/integrations/supabase/client";
 import useWaitTimes from "@/hooks/useWaitTimes";
 import { useToast } from "@/hooks/use-toast";
@@ -24,7 +26,7 @@ const Dashboard = () => {
   const { globalAverage: globalAverageWaitTime } = useWaitTimes(2);
   const navigate = useNavigate();
   const { toast } = useToast();
-  const aiAssistantRef = useRef<{ sendMessage: (message: string) => void } | null>(null);
+  const aiAssistantRef = useRef<{ sendMessage: (message: string) => void; setMood: (mood: Emotion) => void } | null>(null);
   const mapViewRef = useRef<{ 
     activateLocation: () => void;
     deactivateLocation: () => void;
@@ -71,10 +73,15 @@ const Dashboard = () => {
       .order('created_at', { ascending: false });
     
     if (medsError) {
-      console.error('Error loading medications:', medsError);
-    }
-    
-    if (meds) {
+      // Check if it's a "table doesn't exist" error
+      if (medsError.code === 'PGRST205' || medsError.message?.includes('schema cache')) {
+        console.warn('[Dashboard] Medications table not found. Please run migration: supabase/migrations/20251110000000_user_medications_appointments.sql');
+        // Don't show error to user, just set empty array
+        setMedications([]);
+      } else {
+        console.error('Error loading medications:', medsError);
+      }
+    } else if (meds) {
       // Check if new medications were added (only show notification if explicitly requested)
       if (showNotifications && meds.length > medications.length) {
         const newMeds = meds.slice(0, meds.length - medications.length);
@@ -88,6 +95,8 @@ const Dashboard = () => {
       }
       // Always update medications state for real-time updates
       setMedications(meds);
+    } else {
+      setMedications([]);
     }
 
     // Load next appointment - get the earliest upcoming appointment
@@ -100,10 +109,15 @@ const Dashboard = () => {
       .limit(1);
     
     if (aptsError) {
-      console.error('Error loading appointments:', aptsError);
-    }
-    
-    if (appointments && appointments.length > 0) {
+      // Check if it's a "table doesn't exist" error
+      if (aptsError.code === 'PGRST205' || aptsError.message?.includes('schema cache')) {
+        console.warn('[Dashboard] Appointments table not found. Please run migration: supabase/migrations/20251110000000_user_medications_appointments.sql');
+        // Don't show error to user, just set null
+        setAppointment(null);
+      } else {
+        console.error('Error loading appointments:', aptsError);
+      }
+    } else if (appointments && appointments.length > 0) {
       // Check if appointment was updated (only show notification if explicitly requested)
       if (showNotifications && (!appointment || appointment.id !== appointments[0].id)) {
         toast({
@@ -119,39 +133,56 @@ const Dashboard = () => {
     }
   };
 
-  // Subscribe to real-time updates
+  // Subscribe to real-time updates for instant card updates
   useEffect(() => {
     if (!user) return;
 
+    console.log('[Dashboard] Setting up real-time subscriptions for user:', user.id);
+
     const medChannel = supabase
-      .channel('user_medications_changes')
+      .channel(`user_medications_${user.id}`)
       .on('postgres_changes', 
-        { event: '*', schema: 'public', table: 'user_medications', filter: `user_id=eq.${user.id}` },
+        { 
+          event: '*', 
+          schema: 'public', 
+          table: 'user_medications', 
+          filter: `user_id=eq.${user.id}` 
+        },
         (payload) => {
-          console.log('[realtime] Medication change:', payload.eventType);
-          // Reload data to update cards - notifications are handled by AIAssistant
-          loadUserData(user.id, false); // Don't show duplicate notifications
+          console.log('[realtime] Medication change detected:', payload.eventType, payload.new || payload.old);
+          // Reload data immediately to update cards - this happens in real-time
+          loadUserData(user.id, false); // Don't show duplicate notifications (AIAssistant already shows them)
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log('[realtime] Medications channel status:', status);
+      });
 
     const aptChannel = supabase
-      .channel('user_appointments_changes')
+      .channel(`user_appointments_${user.id}`)
       .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'user_appointments', filter: `user_id=eq.${user.id}` },
+        { 
+          event: '*', 
+          schema: 'public', 
+          table: 'user_appointments', 
+          filter: `user_id=eq.${user.id}` 
+        },
         (payload) => {
-          console.log('[realtime] Appointment change:', payload.eventType);
-          // Reload data to update cards - notifications are handled by AIAssistant
-          loadUserData(user.id, false); // Don't show duplicate notifications
+          console.log('[realtime] Appointment change detected:', payload.eventType, payload.new || payload.old);
+          // Reload data immediately to update cards - this happens in real-time
+          loadUserData(user.id, false); // Don't show duplicate notifications (AIAssistant already shows them)
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log('[realtime] Appointments channel status:', status);
+      });
 
     return () => {
+      console.log('[Dashboard] Cleaning up real-time subscriptions');
       supabase.removeChannel(medChannel);
       supabase.removeChannel(aptChannel);
     };
-  }, [user, medications, appointment]);
+  }, [user]); // Only depend on user, not on medications/appointment to avoid re-subscribing
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -390,7 +421,18 @@ const Dashboard = () => {
           <div className="lg:col-span-2">
             <div className="opacity-0 animate-[fadeIn_0.5s_ease-in-out_forwards]">
               {activeTab === "map" && <RealTimeMapView ref={mapViewRef} />}
-              {activeTab === "chat" && <AIAssistant ref={aiAssistantRef} />}
+              {activeTab === "chat" && (
+                <div className="space-y-4">
+                  <AIAssistant ref={aiAssistantRef} />
+                  <FaceEmotionDetector 
+                    onEmotionChange={(emotion) => {
+                      if (aiAssistantRef.current) {
+                        aiAssistantRef.current.setMood(emotion);
+                      }
+                    }}
+                  />
+                </div>
+              )}
               {activeTab === "notifications" && <NotificationPanel />}
             </div>
           </div>

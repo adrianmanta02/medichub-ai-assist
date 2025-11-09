@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Send, Bot, User, Sparkles, Pill, Calendar } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
+import { Emotion } from "@/hooks/useFaceEmotion";
 
 interface Message {
   id: string;
@@ -46,6 +47,7 @@ const AIAssistant = forwardRef<AIAssistantHandle>((props, ref) => {
   const [isTyping, setIsTyping] = useState(false);
   const [clinics, setClinics] = useState<any[] | null>(null);
   const [loadingClinics, setLoadingClinics] = useState(false);
+  const [currentMood, setCurrentMood] = useState<Emotion>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
@@ -93,12 +95,17 @@ const AIAssistant = forwardRef<AIAssistantHandle>((props, ref) => {
       }
 
       // Send to local AI endpoint (server will call external LLM if configured)
+      // Include current mood for adaptive responses
       let resp;
       try {
         resp = await fetch('http://localhost:3001/api/ai', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })), userLocation })
+          body: JSON.stringify({ 
+            messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })), 
+            userLocation,
+            userMood: currentMood // Send current detected mood
+          })
         });
       } catch (fetchError: any) {
         // Handle network errors
@@ -128,73 +135,113 @@ const AIAssistant = forwardRef<AIAssistantHandle>((props, ref) => {
       }
 
       // Save extracted medications and appointments to Supabase
+      // This happens automatically when the LLM detects medications/appointments
       if (payload.extractedData) {
         const { medications, appointments } = payload.extractedData;
-        const answerText = (payload.answer || '').toLowerCase();
         
         // Get current user
         const { data: { session } } = await supabase.auth.getSession();
         if (session?.user) {
-          // Save medications - verify they appear in LLM response text
+          // Save medications - trust the AI extraction (it's already validated)
           if (medications && medications.length > 0) {
-            // Filter medications to only include those that appear in the LLM response
-            const validMedications = medications.filter(med => {
-              const medNameLower = med.medication_name.toLowerCase();
-              // Check if medication name appears in the answer text
-              return answerText.includes(medNameLower) || 
-                     answerText.includes(medNameLower.split(' ')[0]); // Check first word if multi-word
-            });
+            // Filter out duplicates by checking if medication with same name and dosage already exists
+            let savedCount = 0;
+            let skippedCount = 0;
             
-            if (validMedications.length > 0) {
-              let savedCount = 0;
-              for (const med of validMedications) {
+            for (const med of medications) {
+              // Check if this medication already exists (same name and dosage)
+              const { data: existing } = await supabase
+                .from('user_medications')
+                .select('id')
+                .eq('user_id', session.user.id)
+                .eq('medication_name', med.medication_name)
+                .eq('dosage', med.dosage)
+                .limit(1);
+              
+              // Only insert if it doesn't exist
+              if (!existing || existing.length === 0) {
                 const { error } = await supabase.from('user_medications').insert({
                   user_id: session.user.id,
-                  medication_name: med.medication_name,
-                  dosage: med.dosage,
-                  frequency: med.frequency
+                  medication_name: med.medication_name.trim(),
+                  dosage: med.dosage.trim(),
+                  frequency: med.frequency.trim()
                 });
-                if (!error) savedCount++;
+                if (!error) {
+                  savedCount++;
+                } else {
+                  // Check if it's a "table doesn't exist" error
+                  if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
+                    console.error('[AIAssistant] Medications table not found. Please run migration: supabase/migrations/20251110000000_user_medications_appointments.sql');
+                    toast({
+                      title: "⚠️ Eroare de configurare",
+                      description: "Tabelul de medicamente nu există. Te rog rulează migrarea în Supabase.",
+                      variant: "destructive",
+                      duration: 7000,
+                    });
+                  } else {
+                    console.warn('[AIAssistant] Failed to save medication:', error);
+                  }
+                }
+              } else {
+                skippedCount++;
               }
-              
-              if (savedCount > 0) {
-                // Show notification in bottom right
-                toast({
-                  title: "💊 Medicament identificat",
-                  description: `${savedCount} medicament${savedCount > 1 ? 'e' : ''} ${savedCount > 1 ? 'au fost' : 'a fost'} identificat${savedCount > 1 ? 'e' : ''} și ${savedCount > 1 ? 'au fost' : 'a fost'} adăugat${savedCount > 1 ? 'e' : ''} în lista de Medicație`,
-                  duration: 5000,
-                });
-              }
-            }
-          }
-
-          // Save appointments (replace existing if any)
-          if (appointments && appointments.length > 0) {
-            // Delete existing appointments for this user
-            await supabase.from('user_appointments').delete().eq('user_id', session.user.id);
-            
-            // Insert new appointment
-            let savedCount = 0;
-            for (const apt of appointments) {
-              const { error } = await supabase.from('user_appointments').insert({
-                user_id: session.user.id,
-                doctor_name: apt.doctor_name,
-                specialty: apt.specialty,
-                clinic_name: apt.clinic_name,
-                appointment_date: apt.appointment_date || null,
-                appointment_time: apt.appointment_time || null
-              });
-              if (!error) savedCount++;
             }
             
             if (savedCount > 0) {
-              const apt = appointments[0];
-              // Show notification in bottom right
+              // Show notification - real-time update will happen via Supabase subscription
               toast({
-                title: "📅 Programare identificată",
-                description: `Programarea cu ${apt.doctor_name} la ${apt.clinic_name} a fost identificată și adăugată în lista de Următoarea consultație`,
+                title: "💊 Medicament identificat",
+                description: `${savedCount} medicament${savedCount > 1 ? 'e' : ''} ${savedCount > 1 ? 'au fost' : 'a fost'} adăugat${savedCount > 1 ? 'e' : ''} în lista de Medicație`,
                 duration: 5000,
               });
+            }
+            
+            if (skippedCount > 0 && savedCount === 0) {
+              // All medications were duplicates
+              toast({
+                title: "💊 Medicament deja existent",
+                description: `Medicament${skippedCount > 1 ? 'ele' : 'ul'} ${skippedCount > 1 ? 'sunt' : 'este'} deja în lista ta`,
+                duration: 3000,
+              });
+            }
+          }
+
+          // Save appointments - replace existing (user typically has one next appointment)
+          if (appointments && appointments.length > 0) {
+            // Delete existing appointments for this user (we keep only the most recent/upcoming)
+            await supabase.from('user_appointments').delete().eq('user_id', session.user.id);
+            
+            // Insert new appointment(s) - take the first one as primary
+            const primaryAppointment = appointments[0];
+            const { error } = await supabase.from('user_appointments').insert({
+              user_id: session.user.id,
+              doctor_name: primaryAppointment.doctor_name.trim(),
+              specialty: primaryAppointment.specialty.trim(),
+              clinic_name: primaryAppointment.clinic_name.trim(),
+              appointment_date: primaryAppointment.appointment_date ? primaryAppointment.appointment_date.trim() : null,
+              appointment_time: primaryAppointment.appointment_time ? primaryAppointment.appointment_time.trim() : null
+            });
+            
+            if (!error) {
+              // Show notification - real-time update will happen via Supabase subscription
+              toast({
+                title: "📅 Programare identificată",
+                description: `Programarea cu ${primaryAppointment.doctor_name} ${primaryAppointment.appointment_date ? `pe ${primaryAppointment.appointment_date}` : ''} a fost adăugată în lista de Următoarea consultație`,
+                duration: 5000,
+              });
+            } else {
+              // Check if it's a "table doesn't exist" error
+              if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
+                console.error('[AIAssistant] Appointments table not found. Please run migration: supabase/migrations/20251110000000_user_medications_appointments.sql');
+                toast({
+                  title: "⚠️ Eroare de configurare",
+                  description: "Tabelul de programări nu există. Te rog rulează migrarea în Supabase.",
+                  variant: "destructive",
+                  duration: 7000,
+                });
+              } else {
+                console.warn('[AIAssistant] Failed to save appointment:', error);
+              }
             }
           }
         }
@@ -250,10 +297,13 @@ const AIAssistant = forwardRef<AIAssistantHandle>((props, ref) => {
     }
   };
 
-  // Expose sendMessage method to parent
+  // Expose sendMessage and setMood methods to parent
   useImperativeHandle(ref, () => ({
     sendMessage: (message: string) => {
       handleSendWithMessage(message);
+    },
+    setMood: (mood: Emotion) => {
+      setCurrentMood(mood);
     },
   }));
 
