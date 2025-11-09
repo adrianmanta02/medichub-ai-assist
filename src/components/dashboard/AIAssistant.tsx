@@ -69,15 +69,39 @@ const AIAssistant = () => {
       }
 
       // Send to local AI endpoint (server will call external LLM if configured)
-      const resp = await fetch('http://localhost:3001/api/ai', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })), userLocation })
-      });
+      let resp;
+      try {
+        resp = await fetch('http://localhost:3001/api/ai', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })), userLocation })
+        });
+      } catch (fetchError: any) {
+        // Handle network errors
+        if (fetchError.message?.includes('Failed to fetch') || fetchError.message?.includes('ERR_BLOCKED_BY_CLIENT')) {
+          throw new Error('🔒 Conexiune blocată de extensia browserului!\n\n' +
+            'O extensie (ad blocker, privacy tool) blochează conexiunea la localhost.\n\n' +
+            'Soluții:\n' +
+            '1. Dezactivează temporar ad blocker-ul pentru localhost\n' +
+            '2. Adaugă localhost la whitelist în extensia de securitate\n' +
+            '3. Testează în modul incognito/private (fără extensii)\n' +
+            '4. Verifică dacă serverul rulează: http://localhost:3001/api/status');
+        }
+        throw fetchError;
+      }
 
-      if (!resp.ok) throw new Error('AI server error');
+      if (!resp.ok) {
+        const errorText = await resp.text().catch(() => 'Unknown error');
+        console.error('Server error response:', resp.status, errorText);
+        throw new Error(`Server error (${resp.status}): ${errorText.slice(0, 200)}`);
+      }
 
       const payload = await resp.json();
+      
+      // Check if server returned an error
+      if (payload.error) {
+        throw new Error(payload.error);
+      }
 
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -90,10 +114,37 @@ const AIAssistant = () => {
       setIsTyping(false);
     } catch (error: any) {
       console.error("AI error:", error);
+      console.error("Error details:", {
+        message: error?.message,
+        stack: error?.stack,
+        name: error?.name
+      });
+      
+      // Show actual error message to help debug
+      let errorContent = "Ne cerem scuze, a apărut o eroare. Te rog încearcă din nou.";
+      
+      if (error?.message) {
+        // If error message contains newlines, preserve them (for formatted errors)
+        if (error.message.includes('\n')) {
+          errorContent = error.message;
+        } else {
+          errorContent = `Eroare: ${error.message}`;
+        }
+        
+        // Add helpful suggestions based on error
+        if (error.message.includes('blocată') || error.message.includes('ERR_BLOCKED_BY_CLIENT')) {
+          // Already has detailed message, don't add more
+        } else if (error.message.includes('conecta la server') || error.message.includes('Failed to fetch')) {
+          errorContent += '\n\n💡 Verifică:\n1. Serverul rulează? (http://localhost:3001/api/status)\n2. Portul 3001 este accesibil?\n3. Nu ai extensii care blochează localhost?';
+        } else if (error.message.includes('500') || error.message.includes('invalid payload')) {
+          errorContent += '\n\n💡 Eroare la server. Verifică consola serverului pentru detalii.';
+        }
+      }
+      
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: "Ne cerem scuze, a apărut o eroare. Te rog încearcă din nou.",
+        content: errorContent,
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, errorMessage]);
@@ -115,7 +166,21 @@ const AIAssistant = () => {
 
     setLoadingClinics(true);
     try {
-      const pos = await new Promise<GeolocationPosition>((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject));
+      // Check if secure origin (localhost or HTTPS)
+      const isSecureOrigin = window.location.protocol === 'https:' || 
+                            window.location.hostname === 'localhost' || 
+                            window.location.hostname === '127.0.0.1';
+      
+      if (!isSecureOrigin) {
+        throw new Error('Geolocation requires HTTPS or localhost. Please use http://localhost:5173');
+      }
+
+      const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          timeout: 10000,
+          enableHighAccuracy: false
+        });
+      });
       const userLocation = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
       const resp = await fetch('http://localhost:3001/api/clinics', {
         method: 'POST',

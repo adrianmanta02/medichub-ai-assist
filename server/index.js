@@ -228,31 +228,111 @@ const kb = loadKB();
 const clinics = loadClinics();
 
 // Helper: call external LLM providers (ollama or huggingface)
-async function callExternalLLM(prompt, opts = {}) {
+async function callExternalLLM(prompt, messages = null, opts = {}) {
   const provider = (process.env.LLM_PROVIDER || '').toLowerCase();
   try {
     if (provider === 'ollama' && process.env.OLLAMA_API_URL) {
-      const url = process.env.OLLAMA_API_URL; // e.g. http://localhost:11434/api/generate
+      let baseUrl = process.env.OLLAMA_API_URL.trim();
+      // Remove trailing slashes and any endpoint paths
+      baseUrl = baseUrl.replace(/\/api\/(generate|chat)$/, '').replace(/\/$/, '');
       const model = process.env.OLLAMA_MODEL || "llama3";
 
-      const body = url.includes("/api/chat")
-        ? { model, messages: [{ role: 'user', content: prompt }] }
-        : { model, prompt, stream: false };
+      // Determine which endpoint to use (default to chat API)
+      const useChatEndpoint = process.env.OLLAMA_USE_CHAT !== 'false';
+      const endpoint = useChatEndpoint ? '/api/chat' : '/api/generate';
+      const url = `${baseUrl}${endpoint}`;
 
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+      console.log('[ollama] Configuration:', {
+        baseUrl,
+        endpoint,
+        model,
+        useChatEndpoint,
+        hasMessages: messages && Array.isArray(messages)
       });
+
+      let body;
+      if (useChatEndpoint && messages && Array.isArray(messages)) {
+        // Use chat API with full conversation history
+        body = {
+          model: model,
+          messages: messages,
+          stream: false,
+          options: {
+            temperature: 0.7,
+            top_p: 0.9,
+          }
+        };
+      } else if (useChatEndpoint) {
+        // Use chat API with single prompt (convert to messages format)
+        body = {
+          model: model,
+          messages: [{ role: 'user', content: prompt }],
+          stream: false,
+          options: {
+            temperature: 0.7,
+            top_p: 0.9,
+          }
+        };
+      } else {
+        // Use legacy generate API
+        body = {
+          model: model,
+          prompt: prompt,
+          stream: false,
+        };
+      }
+
+      console.log('[ollama] Calling:', url, 'with model:', model);
+      console.log('[ollama] Request body:', JSON.stringify(body).slice(0, 500));
+      
+      let r;
+      try {
+        r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      } catch (fetchError) {
+        console.error('[ollama] Fetch error:', fetchError.message);
+        console.error('[ollama] This usually means Ollama is not running or not accessible at:', url);
+        throw new Error(`Cannot connect to Ollama at ${url}. Make sure Ollama is running. Error: ${fetchError.message}`);
+      }
+
+      if (!r.ok) {
+        const errorText = await r.text();
+        console.error('[ollama] API error:', r.status, errorText);
+        console.error('[ollama] URL was:', url);
+        console.error('[ollama] Model was:', model);
+        throw new Error(`Ollama API error (${r.status}): ${errorText.slice(0, 200)}`);
+      }
 
       const j = await r.json();
 
-      if (j?.response) return j.response;
-      if (j?.message?.content) return j.message.content;
-      if (j?.output) return Array.isArray(j.output)
-        ? j.output.map(o => o.content || JSON.stringify(o)).join('\n')
-        : String(j.output);
-      return typeof j === 'string' ? j : JSON.stringify(j);
+      // Handle different response formats
+      if (j?.message?.content) {
+        // Chat API response format
+        return j.message.content;
+      }
+      if (j?.response) {
+        // Generate API response format
+        return j.response;
+      }
+      if (j?.content) {
+        // Alternative chat format
+        return j.content;
+      }
+      if (j?.output) {
+        // Array or string output
+        return Array.isArray(j.output)
+          ? j.output.map(o => o.content || JSON.stringify(o)).join('\n')
+          : String(j.output);
+      }
+      if (typeof j === 'string') {
+        return j;
+      }
+
+      console.warn('[ollama] Unexpected response format:', JSON.stringify(j).slice(0, 200));
+      return JSON.stringify(j);
     }
 
 
@@ -331,10 +411,11 @@ const server = http.createServer((req, res) => {
         const lastMessage = Array.isArray(payload.messages) ? payload.messages[payload.messages.length - 1] : null;
         const question = lastMessage?.content || payload.question || '';
 
-        if (emergencyDetected(question)) {
-          const answer = 'Semnal de urgență detectat — sună la 112 sau du-te imediat la cea mai apropiată unitate de urgență.';
-          return res.end(JSON.stringify({ answer, emergency: true, sources: [] }));
-        }
+        // Emergency detection removed - let the LLM handle it naturally
+        // if (emergencyDetected(question)) {
+        //   const answer = 'Semnal de urgență detectat — sună la 112 sau du-te imediat la cea mai apropiată unitate de urgență.';
+        //   return res.end(JSON.stringify({ answer, emergency: true, sources: [] }));
+        // }
 
         const retrieved = simpleRetrieve(question, 6);
 
@@ -416,28 +497,79 @@ const server = http.createServer((req, res) => {
         const context = contextParts.join('\n\n');
 
 
-        // VEZI DIN NOU PARTEA ASTA !!
-        dotenv.config();
-
-        // înlocuiește complet secțiunea în care definești `systemPrompt` + `prompt`
+        // Load system prompt
         function loadSystemPrompt() {
           const promptFile = process.env.SYSTEM_PROMPT_FILE
             ? path.resolve(__dirname, process.env.SYSTEM_PROMPT_FILE)
             : null;
-          if (!promptFile || !fs.existsSync(promptFile)) return "";
+          if (!promptFile || !fs.existsSync(promptFile)) {
+            // Improved default system prompt - more specific and focused
+            return `Ești HealthHub AI - un asistent medical civic, empatic și informat pentru cetățenii români.
+
+ROLUL TĂU:
+- Ajuți utilizatorii să găsească clinici, farmacii și servicii medicale în București
+- Oferi informații generale despre sănătate, prevenție și tratamente comune
+- Recomanzi clinici bazat pe distanță, rating, timp de așteptare și preț
+- Nu pui diagnostice medicale, dar oferi sfaturi generale și orientare
+
+INSTRUCȚIUNI IMPORTANTE:
+1. Răspunde ÎNTOTDEAUNA în limba română, cu ton cald și respectuos
+2. Fii concis și relevant - răspunde direct la întrebare
+3. Dacă utilizatorul întreabă despre clinici/farmacii:
+   - Recomandă clinica cea mai potrivită (distanță mică, rating bun, timp așteptare scăzut)
+   - Menționează concret numele, adresa, timpul de așteptare și rating-ul
+   - Explică de ce ai ales acea clinică
+4. Dacă utilizatorul are simptome:
+   - Sugerează măsuri generale (hidratare, odihnă, medicamente uzuale)
+   - Indică când ar trebui să consulte un medic
+   - Pentru urgențe, scrie clar: "URGENȚĂ: sună la 112"
+5. Dacă întrebarea nu e despre sănătate/clinici:
+   - Răspunde scurt și sugerează să cauți o clinică relevantă
+   - Menționează că ești specializat în asistență medicală
+6. Folosește contextul furnizat pentru a da răspunsuri precise
+7. Dacă nu știi răspunsul, spune sincer și sugerează consultarea unui medic specialist
+
+TON: Profesional dar prietenos, empatic, clar și pe înțelesul oricui.`;
+          }
           return fs.readFileSync(promptFile, "utf8");
         }
 
         const systemPrompt = loadSystemPrompt();
-        const prompt = `${systemPrompt}\n\nContext:\n${context}\n\nÎntrebare:\n${question}`;
+        
+        // Build messages array for chat API
+        const messagesForLLM = [];
+        
+        // Add system prompt
+        if (systemPrompt) {
+          messagesForLLM.push({ role: 'system', content: systemPrompt });
+        }
+        
+        // Add conversation history (filter out previous system messages)
+        if (Array.isArray(payload.messages)) {
+          const conversationHistory = payload.messages
+            .filter(m => m.role !== 'system')
+            .slice(0, -1); // Exclude the current message (last one)
+          messagesForLLM.push(...conversationHistory);
+        }
+        
+        // Add current question with context
+        const questionWithContext = context 
+          ? `Context:\n${context}\n\nÎntrebare:\n${question}`
+          : question;
+        messagesForLLM.push({ role: 'user', content: questionWithContext });
 
+        // Legacy prompt format for generate API fallback
+        const prompt = `${systemPrompt}\n\nContext:\n${context}\n\nÎntrebare:\n${question}`;
 
         let answer = null;
 
-        // Try external LLM if configured
-        const llmResp = await callExternalLLM(prompt);
+        // Try external LLM if configured (pass both prompt and messages)
+        const llmResp = await callExternalLLM(prompt, messagesForLLM);
         if (llmResp) {
           answer = String(llmResp).trim();
+          console.log('[ai] LLM response length:', answer.length);
+        } else {
+          console.log('[ai] No LLM response, using fallback');
         }
 
         // If no external LLM configured or failed, fallback to local behavior
@@ -461,7 +593,14 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ answer, emergency: false, sources: retrieved.map(r => ({ id: r.id, title: r.title })) }));
       } catch (e) {
         console.error('ai handler error', e);
-        res.writeHead(500); res.end(JSON.stringify({ error: 'invalid payload' }));
+        console.error('Error stack:', e.stack);
+        const errorMessage = e.message || 'Unknown error';
+        res.writeHead(500);
+        res.end(JSON.stringify({ 
+          error: 'Server error',
+          message: errorMessage,
+          details: process.env.NODE_ENV === 'development' ? e.stack : undefined
+        }));
       }
     });
     return;
@@ -618,6 +757,81 @@ const server = http.createServer((req, res) => {
       res.writeHead(500);
       res.end(JSON.stringify({ error: 'server error' }));
     }
+    return;
+  }
+
+  // GET /api/status - Server status and configuration
+  if (req.method === 'GET' && req.url === '/api/status') {
+    const status = {
+      status: 'running',
+      port: process.env.PORT || '3001',
+      llmProvider: (process.env.LLM_PROVIDER || '').toLowerCase() || 'none',
+      ollamaConfigured: !!(process.env.OLLAMA_API_URL),
+      ollamaUrl: process.env.OLLAMA_API_URL || null,
+      ollamaModel: process.env.OLLAMA_MODEL || 'llama3',
+      timestamp: new Date().toISOString()
+    };
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(status, null, 2));
+    return;
+  }
+
+  // GET /api/test-ollama - Test Ollama connection
+  if (req.method === 'GET' && req.url === '/api/test-ollama') {
+    res.setHeader('Content-Type', 'application/json');
+    (async () => {
+      try {
+        if (!process.env.OLLAMA_API_URL) {
+          return res.end(JSON.stringify({ 
+            error: 'Ollama not configured',
+            message: 'OLLAMA_API_URL not set in environment'
+          }));
+        }
+
+        const baseUrl = process.env.OLLAMA_API_URL.trim().replace(/\/api\/(generate|chat)$/, '').replace(/\/$/, '');
+        const model = process.env.OLLAMA_MODEL || 'llama3';
+        const testUrl = `${baseUrl}/api/chat`;
+
+        console.log('[test-ollama] Testing connection to:', testUrl);
+
+        const testResponse = await fetch(testUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: model,
+            messages: [{ role: 'user', content: 'Say "test" if you can read this.' }],
+            stream: false
+          })
+        });
+
+        if (!testResponse.ok) {
+          const errorText = await testResponse.text();
+          return res.end(JSON.stringify({
+            error: 'Ollama connection failed',
+            status: testResponse.status,
+            message: errorText,
+            url: testUrl
+          }));
+        }
+
+        const testData = await testResponse.json();
+        res.end(JSON.stringify({
+          success: true,
+          message: 'Ollama is working!',
+          response: testData?.message?.content || testData?.response || 'Response received',
+          url: testUrl,
+          model: model
+        }));
+
+      } catch (e) {
+        console.error('[test-ollama] Error:', e);
+        res.end(JSON.stringify({
+          error: 'Test failed',
+          message: e.message,
+          stack: process.env.NODE_ENV === 'development' ? e.stack : undefined
+        }));
+      }
+    })();
     return;
   }
 

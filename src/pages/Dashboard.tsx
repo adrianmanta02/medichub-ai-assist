@@ -65,9 +65,16 @@ const Dashboard = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-background via-primary-light/5 to-accent-light/5">
+    <div className="min-h-screen bg-gradient-to-br from-background via-primary-light/10 via-secondary-light/5 to-accent-light/10 relative overflow-hidden">
+      {/* Animated background elements for depth */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-0 left-0 w-96 h-96 bg-primary/5 rounded-full blur-3xl animate-pulse" style={{ animationDuration: '8s' }}></div>
+        <div className="absolute bottom-0 right-0 w-96 h-96 bg-accent/5 rounded-full blur-3xl animate-pulse" style={{ animationDuration: '10s', animationDelay: '1s' }}></div>
+        <div className="absolute top-1/2 left-1/2 w-96 h-96 bg-secondary/5 rounded-full blur-3xl animate-pulse" style={{ animationDuration: '12s', animationDelay: '2s' }}></div>
+      </div>
+
       {/* Header */}
-      <header className="glass-card border-b sticky top-0 z-50">
+      <header className="glass-card border-b sticky top-4 z-50 mx-4 rounded-2xl shadow-xl backdrop-blur-xl bg-white/90 dark:bg-slate-900/90 border-white/20">
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -107,8 +114,8 @@ const Dashboard = () => {
       {/* Main Content */}
       <main className="container mx-auto px-4 py-6">
         {/* Quick Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          <Card className="p-4 glass-card hover:shadow-lg transition-all">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 relative z-10">
+          <Card className="p-4 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1 animate-float-slow" style={{ animationDelay: '0s' }}>
             <div className="flex items-center gap-3">
               <div className="w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center">
                 <MapPin className="w-6 h-6 text-primary" />
@@ -120,7 +127,7 @@ const Dashboard = () => {
             </div>
           </Card>
           
-          <Card className="p-4 glass-card hover:shadow-lg transition-all">
+          <Card className="p-4 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1 animate-float-slow" style={{ animationDelay: '0.2s' }}>
             <div className="flex items-center gap-3">
               <div className="w-12 h-12 rounded-lg bg-secondary/10 flex items-center justify-center">
                 <Clock className="w-6 h-6 text-secondary" />
@@ -132,7 +139,7 @@ const Dashboard = () => {
             </div>
           </Card>
           
-          <Card className="p-4 glass-card hover:shadow-lg transition-all">
+          <Card className="p-4 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1 animate-float-slow" style={{ animationDelay: '0.4s' }}>
             <div className="flex items-center gap-3">
               <div className="w-12 h-12 rounded-lg bg-accent/10 flex items-center justify-center">
                 <MessageSquare className="w-6 h-6 text-accent" />
@@ -144,7 +151,7 @@ const Dashboard = () => {
             </div>
           </Card>
           
-          <Card className="p-4 glass-card hover:shadow-lg transition-all">
+          <Card className="p-4 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1 animate-float-slow" style={{ animationDelay: '0.6s' }}>
             <div className="flex items-center gap-3">
               <div className="w-12 h-12 rounded-lg bg-yellow-500/10 flex items-center justify-center">
                 <Star className="w-6 h-6 text-yellow-500" />
@@ -186,16 +193,18 @@ const Dashboard = () => {
         </div>
 
         {/* Content Area */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative z-10">
           <div className="lg:col-span-2">
-            {activeTab === "map" && <RealTimeMapView />}
-            {activeTab === "chat" && <AIAssistant />}
-            {activeTab === "notifications" && <NotificationPanel />}
+            <div className="opacity-0 animate-[fadeIn_0.5s_ease-in-out_forwards]">
+              {activeTab === "map" && <RealTimeMapView />}
+              {activeTab === "chat" && <AIAssistant />}
+              {activeTab === "notifications" && <NotificationPanel />}
+            </div>
           </div>
 
           {/* Sidebar */}
           <div className="space-y-4">
-            <Card className="p-6 glass-card">
+            <Card className="p-6 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
                 <Activity className="w-5 h-5 text-primary" />
                 Următoarea consultație
@@ -218,7 +227,7 @@ const Dashboard = () => {
               </div>
             </Card>
 
-            <Card className="p-6 glass-card">
+            <Card className="p-6 glass-card hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
                 <Clock className="w-5 h-5 text-accent" />
                 Medicație

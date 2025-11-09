@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,6 +18,39 @@ L.Icon.Default.mergeOptions({
   iconUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png",
   shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png",
 });
+
+// Create green medical facility icon function
+const createGreenMedicalIcon = () => {
+  return L.divIcon({
+    className: 'custom-medical-marker',
+    html: `
+      <div style="
+        width: 32px;
+        height: 32px;
+        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        border: 3px solid white;
+        border-radius: 50% 50% 50% 0;
+        transform: rotate(-45deg);
+        box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
+        position: relative;
+      ">
+        <div style="
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%) rotate(45deg);
+          width: 12px;
+          height: 12px;
+          background: white;
+          border-radius: 50%;
+        "></div>
+      </div>
+    `,
+    iconSize: [32, 32],
+    iconAnchor: [16, 32],
+    popupAnchor: [0, -32],
+  });
+};
 
 interface Clinic {
   id: string;
@@ -91,16 +124,34 @@ const RealTimeMapView = () => {
   }, [clinicAverages, selectedClinic, toast]);
 
   useEffect(() => {
-    // Get user location
-    if (navigator.geolocation) {
+    // Get user location (only if secure origin - localhost or HTTPS)
+    const isSecureOrigin = window.location.protocol === 'https:' || 
+                          window.location.hostname === 'localhost' || 
+                          window.location.hostname === '127.0.0.1';
+    
+    if (navigator.geolocation && isSecureOrigin) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
           setUserLocation([position.coords.latitude, position.coords.longitude]);
         },
         (error) => {
-          console.error("Error getting location:", error);
+          // Only log non-permission errors (permission denied is expected)
+          if (error.code !== GeolocationPositionError.PERMISSION_DENIED) {
+            // Suppress "secure origins" error - it's expected if not on localhost/HTTPS
+            if (!error.message.includes('secure origins')) {
+              console.warn("Geolocation error:", error.message);
+            }
+          }
+          // Keep default location (Bucharest center)
+        },
+        {
+          timeout: 5000,
+          enableHighAccuracy: false
         }
       );
+    } else if (!isSecureOrigin) {
+      // Silently use default location if not on secure origin
+      console.log('Geolocation requires HTTPS or localhost. Using default location.');
     }
 
     fetchClinics();
@@ -143,11 +194,8 @@ const RealTimeMapView = () => {
     }
   };
 
-  const getMarkerColor = (clinic: Clinic) => {
-    if (clinic.wait_time && clinic.wait_time < 10) return "green";
-    if (clinic.wait_time && clinic.wait_time < 30) return "orange";
-    return "red";
-  };
+  // Create green medical icon for all markers (consistent green for all medical facilities)
+  const medicalIcon = useMemo(() => createGreenMedicalIcon(), []);
 
   if (loading) {
     return (
@@ -187,6 +235,7 @@ const RealTimeMapView = () => {
             <Marker
               key={clinic.id}
               position={[clinic.latitude, clinic.longitude]}
+              icon={medicalIcon}
               eventHandlers={{
                 click: () => setSelectedClinic(clinic),
               }}
