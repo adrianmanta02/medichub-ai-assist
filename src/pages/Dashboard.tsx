@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { MapPin, MessageSquare, Mic, Bell, User, Activity, Clock, Star, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import DocumentScanner from "@/components/dashboard/DocumentScanner";
 import { supabase } from "@/integrations/supabase/client";
 import useWaitTimes from "@/hooks/useWaitTimes";
 import { useToast } from "@/hooks/use-toast";
+import { VoiceCommandAction } from "@/utils/voiceCommands";
 
 const Dashboard = () => {
   const [activeTab, setActiveTab] = useState<"map" | "chat" | "notifications">("map");
@@ -23,6 +24,12 @@ const Dashboard = () => {
   const { globalAverage: globalAverageWaitTime } = useWaitTimes(2);
   const navigate = useNavigate();
   const { toast } = useToast();
+  const aiAssistantRef = useRef<{ sendMessage: (message: string) => void } | null>(null);
+  const mapViewRef = useRef<{ 
+    activateLocation: () => void;
+    deactivateLocation: () => void;
+    findClinics: (type?: 'pharmacy' | 'clinic' | 'hospital') => void;
+  } | null>(null);
 
   useEffect(() => {
     // Check authentication
@@ -142,6 +149,93 @@ const Dashboard = () => {
     navigate("/");
   };
 
+  // Handle voice commands
+  const handleVoiceCommand = (command: VoiceCommandAction) => {
+    console.log('[Dashboard] Voice command:', command);
+
+    switch (command.type) {
+      case 'navigate':
+        setActiveTab(command.tab);
+        toast({
+          title: "Navigare",
+          description: `Deschis tab: ${command.tab === 'map' ? 'Hartă' : command.tab === 'chat' ? 'AI Asistent' : 'Notificări'}`,
+        });
+        break;
+
+      case 'ai_message':
+        // Switch to chat tab if not already there
+        if (activeTab !== 'chat') {
+          setActiveTab('chat');
+        }
+        // Send message to AI after a short delay to allow tab switch
+        setTimeout(() => {
+          if (aiAssistantRef.current) {
+            aiAssistantRef.current.sendMessage(command.message);
+          }
+        }, 300);
+        break;
+
+      case 'location':
+        if (command.action === 'activate') {
+          if (activeTab !== 'map') {
+            setActiveTab('map');
+          }
+          setTimeout(() => {
+            if (mapViewRef.current) {
+              mapViewRef.current.activateLocation();
+            }
+          }, 300);
+        } else {
+          if (mapViewRef.current) {
+            mapViewRef.current.deactivateLocation();
+          }
+        }
+        break;
+
+      case 'find_clinics':
+        if (activeTab !== 'map') {
+          setActiveTab('map');
+        }
+        setTimeout(() => {
+          if (mapViewRef.current) {
+            mapViewRef.current.findClinics(command.type);
+          }
+        }, 300);
+        break;
+
+      case 'search':
+        if (command.target === 'chat') {
+          if (activeTab !== 'chat') {
+            setActiveTab('chat');
+          }
+          setTimeout(() => {
+            if (aiAssistantRef.current) {
+              aiAssistantRef.current.sendMessage(command.query);
+            }
+          }, 300);
+        } else {
+          // Map search - could be implemented later
+          toast({
+            title: "Căutare",
+            description: `Căutare: ${command.query}`,
+          });
+        }
+        break;
+
+      case 'unknown':
+        // Treat unknown commands as AI messages
+        if (activeTab !== 'chat') {
+          setActiveTab('chat');
+        }
+        setTimeout(() => {
+          if (aiAssistantRef.current) {
+            aiAssistantRef.current.sendMessage(command.transcript);
+          }
+        }, 300);
+        break;
+    }
+  };
+
   if (!user) {
     return null;
   }
@@ -179,7 +273,8 @@ const Dashboard = () => {
             <div className="flex items-center gap-2">
               <VoiceControl 
                 isActive={isVoiceActive} 
-                onToggle={() => setIsVoiceActive(!isVoiceActive)} 
+                onToggle={() => setIsVoiceActive(!isVoiceActive)}
+                onCommand={handleVoiceCommand}
               />
               <Button variant="ghost" size="icon" className="relative">
                 <Bell className="w-5 h-5" />
@@ -278,8 +373,8 @@ const Dashboard = () => {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative z-10">
           <div className="lg:col-span-2">
             <div className="opacity-0 animate-[fadeIn_0.5s_ease-in-out_forwards]">
-              {activeTab === "map" && <RealTimeMapView />}
-              {activeTab === "chat" && <AIAssistant />}
+              {activeTab === "map" && <RealTimeMapView ref={mapViewRef} />}
+              {activeTab === "chat" && <AIAssistant ref={aiAssistantRef} />}
               {activeTab === "notifications" && <NotificationPanel />}
             </div>
           </div>

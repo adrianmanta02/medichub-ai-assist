@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,11 @@ interface Message {
   timestamp: Date;
 }
 
-const AIAssistant = () => {
+export interface AIAssistantHandle {
+  sendMessage: (message: string) => void;
+}
+
+const AIAssistant = forwardRef<AIAssistantHandle>((props, ref) => {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
@@ -39,18 +43,21 @@ const AIAssistant = () => {
     scrollToBottom();
   }, [messages]);
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
+  const handleSendWithMessage = async (messageToSend?: string) => {
+    const messageText = messageToSend || input.trim();
+    if (!messageText) return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
-      content: input,
+      content: messageText,
       timestamp: new Date(),
     };
 
     setMessages((prev) => [...prev, userMessage]);
-    setInput("");
+    if (!messageToSend) {
+      setInput("");
+    }
     setIsTyping(true);
 
     try {
@@ -213,6 +220,18 @@ const AIAssistant = () => {
       setMessages((prev) => [...prev, errorMessage]);
       setIsTyping(false);
     }
+  };
+
+  // Expose sendMessage method to parent
+  useImperativeHandle(ref, () => ({
+    sendMessage: (message: string) => {
+      handleSendWithMessage(message);
+    },
+  }));
+
+  const handleSend = async () => {
+    if (!input.trim()) return;
+    await handleSendWithMessage();
   };
 
   const findNearbyClinics = async (openNow = true) => {
@@ -435,6 +454,8 @@ const AIAssistant = () => {
       </div>
     </Card>
   );
-};
+});
+
+AIAssistant.displayName = "AIAssistant";
 
 export default AIAssistant;

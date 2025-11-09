@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, forwardRef, useImperativeHandle } from "react";
 import { MapContainer, TileLayer, Marker, Popup, useMap, Polyline } from "react-leaflet";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -129,7 +129,13 @@ function RecenterMap({ center }: { center: [number, number] }) {
   return null;
 }
 
-const RealTimeMapView = () => {
+export interface RealTimeMapViewHandle {
+  activateLocation: () => void;
+  deactivateLocation: () => void;
+  findClinics: (type?: 'pharmacy' | 'clinic' | 'hospital') => void;
+}
+
+const RealTimeMapView = forwardRef<RealTimeMapViewHandle>((props, ref) => {
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedClinic, setSelectedClinic] = useState<Clinic | null>(null);
@@ -363,6 +369,31 @@ const RealTimeMapView = () => {
     locationRequestedRef.current = false;
     console.log('[Location] Tracking stopped');
   }, []);
+
+  // Expose methods to parent via ref
+  useImperativeHandle(ref, () => ({
+    activateLocation: () => {
+      requestLocation();
+    },
+    deactivateLocation: () => {
+      stopTracking();
+      toast({
+        title: "Locația dezactivată",
+        description: "Tracking-ul locației a fost oprit",
+      });
+    },
+    findClinics: (type?: 'pharmacy' | 'clinic' | 'hospital') => {
+      if (type) {
+        setSearchTerm(type === 'pharmacy' ? 'farmacie' : type === 'clinic' ? 'clinică' : 'spital');
+        toast({
+          title: "Căutare",
+          description: `Căutare ${type === 'pharmacy' ? 'farmacii' : type === 'clinic' ? 'clinici' : 'spitale'}`,
+        });
+      } else {
+        setSearchTerm('');
+      }
+    },
+  }), [requestLocation, stopTracking, toast]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -729,6 +760,8 @@ const RealTimeMapView = () => {
       </div>
     </Card>
   );
-};
+});
+
+RealTimeMapView.displayName = "RealTimeMapView";
 
 export default RealTimeMapView;
